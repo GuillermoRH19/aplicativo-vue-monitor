@@ -1,0 +1,46 @@
+/* =========================================
+   Reset y base global — Panel IoT
+========================================= */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  scroll-behavior: smooth;
+}
+
+body {
+  background: #0d0f14;
+  color: #e4e8f0;
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+#app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scrollbar personalizada */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #13161e;
+}
+::-webkit-scrollbar-thumb {
+  background: #252a38;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #6c8efb;
+}
+
+/* Fuente Inter desde Google Fonts (se carga desde index.html) */
