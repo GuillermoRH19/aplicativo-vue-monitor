@@ -5,56 +5,65 @@ import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 //  CONFIGURACIÓN — Edita aquí tus parámetros
 // ============================================================
 const CONFIG = {
-  URL_API_TOP:  'https://jsonplaceholder.typicode.com/todos',
-  URL_API_TODOS: 'https://jsonplaceholder.typicode.com/posts',
+  // ── URLs del backend ──────────────────────────────────────
+  URL_API_TOP:   'http://localhost:3000/api/datos?collection=sensor_readings',
+  URL_API_TODOS: 'http://localhost:3000/api/datos?collection=sensor_readings',
   POLLING_INTERVAL_MS: 5000,
 
+  // ── Campos usados para el ranking de actividad ────────────
+  // deviceCode = identificador del ESP32 (esp32-001, esp32-002, …)
   CAMPOS_TOP: {
-    DEVICE_ID: 'userId',
+    DEVICE_ID: 'deviceCode',
     COUNT: null,
   },
 
+  // ── Campos usados para la tabla de historial ──────────────
   CAMPOS_REGISTROS: {
-    ID_REGISTRO: 'id',
-    DEVICE_ID:   'userId',
-    VALOR:       'title',
-    FECHA:       null,
+    ID_REGISTRO: 'id',          // UUID del evento enviado por Kafka
+    DEVICE_ID:   'deviceCode',  // Código del ESP32 (ej. esp32-001)
+    VALOR:       'value',       // Valor numérico del sensor
+    FECHA:       'timestamp',   // Timestamp ISO 8601 del evento
   },
 
   // ── CONFIGURACIÓN DE SENSORES para las gráficas ──────────
-  // Ajusta estos campos al JSON real de tu MongoDB/Arduino
+  // Cada sensor kafka envía: sensorType (temperature/humidity/pressure)
+  // y el valor numérico en el campo 'value'.
+  // Como cada documento tiene un solo sensorType, filtramos por tipo:
   SENSORES: {
-    // Campo numérico del sensor 1 (ej: temperatura)
-    CAMPO_S1:  null,           // null = se simula con datos mock
+    // Sensor 1: Temperatura
+    CAMPO_S1:  'value',         // Campo numérico real en el documento
+    FILTER_S1: 'temperature',   // Filtrar documentos donde sensorType === este valor
     LABEL_S1:  'Temperatura',
     UNIDAD_S1: '°C',
     COLOR_S1:  '#ff4757',
 
-    // Campo numérico del sensor 2 (ej: humedad)
-    CAMPO_S2:  null,           // null = se simula con datos mock
+    // Sensor 2: Humedad
+    CAMPO_S2:  'value',
+    FILTER_S2: 'humidity',
     LABEL_S2:  'Humedad',
     UNIDAD_S2: '%',
     COLOR_S2:  '#6c8efb',
 
-    // Campo numérico del sensor 3 (ej: presión / otro)
-    CAMPO_S3:  null,           // null = se simula con datos mock
+    // Sensor 3: Presión
+    CAMPO_S3:  'value',
+    FILTER_S3: 'pressure',
     LABEL_S3:  'Presión',
     UNIDAD_S3: 'hPa',
     COLOR_S3:  '#2ed573',
   },
 
-  MAX_PUNTOS_GRAFICA: 20,     // Cuántos puntos de tiempo muestra la línea
+  MAX_PUNTOS_GRAFICA: 20,
   MAX_FILAS_VISIBLES: 12,
 
   ETIQUETAS_TABLA: {
-    ID_REGISTRO: '#',
+    ID_REGISTRO: 'ID Evento',
     DEVICE_ID:   'Dispositivo',
-    VALOR:       'Dato / Valor',
-    FECHA:       'Fecha / Hora',
+    VALOR:       'Valor',
+    FECHA:       'Timestamp',
   },
 
   LABELS: {
-    DEVICE: 'Dispositivo / Arduino',
+    DEVICE: 'Código Dispositivo (ESP32)',
     COUNT:  'Registros enviados',
   },
 }
@@ -143,15 +152,25 @@ async function fetchTodos() {
 
 // ────────────────────────────────────────────────────────────
 //  Actualizar datos de sensores para gráficas
-//  Si tu API real tiene campos numéricos (temperatura, humedad, etc.)
-//  reemplaza la función parsearSensor por: item[CONFIG.SENSORES.CAMPO_SX]
+//  Cada documento de Kafka tiene: sensorType (temperature/humidity/pressure)
+//  y el valor numérico en 'value'. Filtramos por sensorType antes de extraer.
 // ────────────────────────────────────────────────────────────
-function parsearSensor(lista, campo, semilla) {
+/**
+ * Extrae el último valor de un campo dentro de la lista,
+ * filtrando primero por sensorType si se proporciona filtroTipo.
+ * Si no hay datos reales, genera un mock realista.
+ */
+function parsearSensor(lista, campo, filtroTipo, semilla) {
   if (campo) {
-    const vals = lista.map(i => parseFloat(i[campo])).filter(v => !isNaN(v))
-    return vals.length ? vals[vals.length - 1] : null
+    const sublista = filtroTipo
+      ? lista.filter(i => i.sensorType === filtroTipo)
+      : lista
+    const vals = sublista.map(i => parseFloat(i[campo])).filter(v => !isNaN(v))
+    if (vals.length) return vals[vals.length - 1]
+    // Si el tipo de sensor aún no está en los datos actuales, devuelve null
+    return null
   }
-  // Mock: genera valor realista basado en el "hash" del título + ciclo
+  // Mock de respaldo (solo si campo es null)
   const base = (lista.length % 30) + semilla
   return parseFloat((base + Math.sin(contadorPoll.value * 0.4 + semilla) * 5).toFixed(1))
 }
@@ -160,9 +179,9 @@ function actualizarDatosSensores(lista) {
   const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   const max = CONFIG.MAX_PUNTOS_GRAFICA
 
-  const s1 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S1, 22)
-  const s2 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S2, 60)
-  const s3 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S3, 1013)
+  const s1 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S1, CONFIG.SENSORES.FILTER_S1, 22)
+  const s2 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S2, CONFIG.SENSORES.FILTER_S2, 60)
+  const s3 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S3, CONFIG.SENSORES.FILTER_S3, 1013)
 
   historialTiempos.value.push(ahora)
   historialS1.value.push(s1)
