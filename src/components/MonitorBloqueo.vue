@@ -6,8 +6,8 @@ import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 // ============================================================
 const CONFIG = {
   // ── URLs del backend ──────────────────────────────────────
-  URL_API_TOP:   'http://localhost:3000/api/datos?collection=sensor_readings',
-  URL_API_TODOS: 'http://localhost:3000/api/datos?collection=sensor_readings',
+  URL_API_TOP:   'http://localhost:3000/api/datos?collection=processed_readings',
+  URL_API_TODOS: 'http://localhost:3000/api/datos?collection=processed_readings',
   POLLING_INTERVAL_MS: 5000,
 
   // ── Campos usados para el ranking de actividad ────────────
