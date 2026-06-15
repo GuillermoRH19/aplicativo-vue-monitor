@@ -5,9 +5,9 @@ import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 //  CONFIGURACIÓN — Edita aquí tus parámetros
 // ============================================================
 const CONFIG = {
-  // ── URLs del backend ──────────────────────────────────────
-  URL_API_TOP:   'http://localhost:3000/api/datos?collection=processed_readings',
-  URL_API_TODOS: 'http://localhost:3000/api/datos?collection=processed_readings',
+  // ── URLs del backend (se leen de .env.local) ───────────────
+  URL_API_TOP:   import.meta.env.VITE_API_URL_TOP   || 'http://localhost:3000/api/datos?collection=processed_readings',
+  URL_API_TODOS: import.meta.env.VITE_API_URL_TODOS || 'http://localhost:3000/api/datos?collection=processed_readings',
   POLLING_INTERVAL_MS: 5000,
 
   // ── Campos usados para el ranking de actividad ────────────
@@ -83,6 +83,14 @@ const ultimaActTabla = ref(null)
 
 const contadorPoll   = ref(0)
 
+// ── Estado: inactividad global ──
+const ultimoIdRecibido = ref(null)
+const primeraCarga     = ref(true)
+const estaInactivo     = ref(false)
+
+// ── Estado: Inventario de Dispositivos Individuales ──
+const estadosDispositivos = ref({}) // { 'deviceId': { idMasReciente: '...', activo: true } }
+
 // ── Estado: datos de gráficas ──
 const graficasListas = ref(false)
 const historialTiempos = ref([])   // etiquetas de tiempo eje X
@@ -141,6 +149,54 @@ async function fetchTodos() {
     if (!res.ok) throw new Error(`HTTP ${res.status} — ${res.statusText}`)
     const data = await res.json()
     const lista = Array.isArray(data) ? data : data?.results ?? data?.data ?? []
+    
+    // ── Lógica de detección de inactividad ──
+    if (lista.length > 0) {
+      // El último elemento de la lista es el más reciente (porque el backend lo invierte)
+      const idMasReciente = lista[lista.length - 1][CONFIG.CAMPOS_REGISTROS.ID_REGISTRO] || lista[lista.length - 1][CONFIG.CAMPOS_REGISTROS.FECHA]
+      if (primeraCarga.value) {
+        ultimoIdRecibido.value = idMasReciente
+        primeraCarga.value = false
+        estaInactivo.value = false
+      } else {
+        if (ultimoIdRecibido.value === idMasReciente) {
+          estaInactivo.value = true // No ha llegado nada nuevo
+        } else {
+          estaInactivo.value = false
+          ultimoIdRecibido.value = idMasReciente
+        }
+      }
+
+      // ── Lógica de Inventario Individual de Dispositivos ──
+      const ultimosIdsPorDispositivo = {}
+      lista.forEach(item => {
+        const dId = item[CONFIG.CAMPOS_REGISTROS.DEVICE_ID] ?? 'desconocido'
+        const rId = item[CONFIG.CAMPOS_REGISTROS.ID_REGISTRO] || item[CONFIG.CAMPOS_REGISTROS.FECHA]
+        ultimosIdsPorDispositivo[dId] = rId
+      })
+
+      for (const dId in ultimosIdsPorDispositivo) {
+        const nuevoId = ultimosIdsPorDispositivo[dId]
+        if (!estadosDispositivos.value[dId]) {
+          estadosDispositivos.value[dId] = { idMasReciente: nuevoId, activo: true }
+        } else {
+          const oldState = estadosDispositivos.value[dId]
+          if (oldState.idMasReciente === nuevoId) {
+            oldState.activo = false
+          } else {
+            oldState.idMasReciente = nuevoId
+            oldState.activo = true
+          }
+        }
+      }
+      // Marcar inactivos los que cayeron fuera de la ventana
+      for (const dId in estadosDispositivos.value) {
+        if (!ultimosIdsPorDispositivo[dId]) {
+          estadosDispositivos.value[dId].activo = false
+        }
+      }
+    }
+
     registros.value = lista
     estadoTabla.value = lista.length ? 'ok' : 'sin-datos'
     ultimaActTabla.value = new Date().toLocaleTimeString('es-MX')
@@ -179,9 +235,16 @@ function actualizarDatosSensores(lista) {
   const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   const max = CONFIG.MAX_PUNTOS_GRAFICA
 
-  const s1 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S1, CONFIG.SENSORES.FILTER_S1, 22)
-  const s2 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S2, CONFIG.SENSORES.FILTER_S2, 60)
-  const s3 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S3, CONFIG.SENSORES.FILTER_S3, 1013)
+  let s1 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S1, CONFIG.SENSORES.FILTER_S1, 22)
+  let s2 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S2, CONFIG.SENSORES.FILTER_S2, 60)
+  let s3 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S3, CONFIG.SENSORES.FILTER_S3, 1013)
+
+  // Si está inactivo, atenuar/limpiar la gráfica insertando nulls
+  if (estaInactivo.value) {
+    s1 = null
+    s2 = null
+    s3 = null
+  }
 
   historialTiempos.value.push(ahora)
   historialS1.value.push(s1)
@@ -341,8 +404,15 @@ async function pollCiclo() {
   await Promise.all([fetchTop(), fetchTodos()])
 }
 
+// ── Computeds de Inventario ──
+const totalInventario = computed(() => Object.keys(estadosDispositivos.value).length)
+const activosInventario = computed(() => Object.values(estadosDispositivos.value).filter(s => s.activo).length)
+const inactivosInventario = computed(() => totalInventario.value - activosInventario.value)
+
 // ── Nivel de alerta ──
 const nivelAlerta = computed(() => {
+  if (estaInactivo.value) return 'inactivo'
+  
   const p = dispositivoAlerta.value?.porcentaje ?? 0
   if (p >= 70) return 'critico'
   if (p >= 40) return 'alto'
@@ -351,8 +421,9 @@ const nivelAlerta = computed(() => {
 
 const etiquetaEstado = computed(() => {
   const n = nivelAlerta.value
-  if (n === 'critico') return { texto: 'Tráfico Excedido — Requiere Bloqueo Upstream', clase: 'tag-critico' }
-  if (n === 'alto')    return { texto: 'Tráfico Elevado — Monitorear Upstream', clase: 'tag-alto' }
+  if (n === 'inactivo') return { texto: 'INACTIVO / SIN TRÁFICO RECIENTE', clase: 'tag-inactivo' }
+  if (n === 'critico')  return { texto: 'Tráfico Excedido — Requiere Bloqueo Upstream', clase: 'tag-critico' }
+  if (n === 'alto')     return { texto: 'Tráfico Elevado — Monitorear Upstream', clase: 'tag-alto' }
   return { texto: 'Tráfico Normal — Sin Acción Requerida', clase: 'tag-medio' }
 })
 
@@ -443,7 +514,8 @@ onUnmounted(() => {
         <!-- Tarjeta principal -->
         <div class="alerta-card" :class="`nivel-${nivelAlerta}`">
           <div class="alerta-badge">
-            <span v-if="nivelAlerta === 'critico'">🔴 CRÍTICO</span>
+            <span v-if="nivelAlerta === 'inactivo'">⚪ INACTIVO</span>
+            <span v-else-if="nivelAlerta === 'critico'">🔴 CRÍTICO</span>
             <span v-else-if="nivelAlerta === 'alto'">🟠 ALTO</span>
             <span v-else>🟡 MEDIO</span>
           </div>
@@ -559,7 +631,7 @@ onUnmounted(() => {
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
             <span>Dispositivos</span>
           </div>
-          <div class="metric-value" style="color: #6c8efb">{{ Object.keys(conteoDispositivos).length }}<span class="metric-unit">activos</span></div>
+          <div class="metric-value" style="color: #6c8efb">{{ estaInactivo ? 0 : Object.keys(conteoDispositivos).length }}<span class="metric-unit">activos</span></div>
           <div class="metric-sparkline" style="background: rgba(108,142,251,.08); border-color: rgba(108,142,251,.2)">
             <span class="metric-trend">Puntos en gráfica: {{ historialTiempos.length }}/{{ CONFIG.MAX_PUNTOS_GRAFICA }}</span>
           </div>
@@ -631,7 +703,37 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <!-- ── Sección: Historial completo de registros ── -->
+    <!-- ── Inventario de Dispositivos ── -->
+    <section class="inventario-section">
+      <div class="inventario-header">
+        <h2>
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h16M4 14h16M4 6h16M4 18h16"/></svg>
+          Inventario de Dispositivos Conectados
+        </h2>
+        <div class="inventario-stats">
+          <span class="badge-pill">Total: {{ totalInventario }}</span>
+          <span class="badge-pill tag-activo">Activos: {{ activosInventario }}</span>
+          <span class="badge-pill tag-inactivo">Inactivos: {{ inactivosInventario }}</span>
+        </div>
+      </div>
+      
+      <div class="inventario-grid">
+        <div v-for="(estado, id) in estadosDispositivos" :key="id" class="device-card" :class="{ 'device-inactivo': !estado.activo }">
+          <div class="device-card-header">
+            <span class="device-dot" :class="estado.activo ? 'dot-activo' : 'dot-inactivo'"></span>
+            <span class="device-id-text">{{ id }}</span>
+          </div>
+          <div class="device-card-status" :class="estado.activo ? 'text-activo' : 'text-inactivo'">
+            {{ estado.activo ? 'Activo' : 'Inactivo' }}
+          </div>
+        </div>
+        <div v-if="totalInventario === 0" class="empty-state">
+          No hay dispositivos detectados en el sistema.
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Tabla de últimos registros ── -->
     <section class="historial-section">
       <div class="historial-header">
         <h2>
@@ -784,6 +886,8 @@ onUnmounted(() => {
 }
 @keyframes slideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
 .alerta-card::before { content: ''; position: absolute; inset: 0; pointer-events: none; border-radius: var(--radius); opacity: .12; }
+.alerta-card.nivel-inactivo { border-color: rgba(122,130,153,.3); }
+.alerta-card.nivel-inactivo::before { background: radial-gradient(ellipse at top left, var(--clr-muted), transparent 70%); opacity: .05; }
 .alerta-card.nivel-critico { border-color: rgba(255,71,87,.5); }
 .alerta-card.nivel-critico::before { background: radial-gradient(ellipse at top left, var(--clr-critico), transparent 70%); }
 .alerta-card.nivel-alto { border-color: rgba(255,107,53,.4); }
@@ -800,9 +904,11 @@ onUnmounted(() => {
 .nivel-critico .device-id-value { border-color: rgba(255,71,87,.4); }
 .nivel-alto    .device-id-value { border-color: rgba(255,107,53,.4); }
 .device-id-value strong { font-size: 1.5rem; font-weight: 800; font-family: 'Courier New', monospace; letter-spacing: 2px; }
+.nivel-inactivo .device-id-value strong { color: var(--clr-text); opacity: 0.6; }
 .nivel-critico .device-id-value strong { color: var(--clr-critico); }
 .nivel-alto    .device-id-value strong { color: var(--clr-alto); }
 .nivel-medio   .device-id-value strong { color: var(--clr-medio); }
+.nivel-inactivo .device-id-value svg { stroke: var(--clr-muted); }
 .nivel-critico .device-id-value svg { stroke: var(--clr-critico); }
 .nivel-alto    .device-id-value svg { stroke: var(--clr-alto); }
 .nivel-medio   .device-id-value svg { stroke: var(--clr-medio); }
@@ -810,17 +916,24 @@ onUnmounted(() => {
 .stat-item { background: var(--clr-surface-2); border: 1px solid var(--clr-border); border-radius: var(--radius-sm); padding: 14px; display: flex; flex-direction: column; gap: 5px; }
 .stat-label { font-size: .7rem; text-transform: uppercase; letter-spacing: .8px; color: var(--clr-muted); }
 .stat-value { font-size: 1.9rem; font-weight: 800; line-height: 1; }
+.nivel-inactivo .stat-value { color: var(--clr-muted); }
 .nivel-critico .stat-value { color: var(--clr-critico); }
 .nivel-alto    .stat-value { color: var(--clr-alto); }
 .nivel-medio   .stat-value { color: var(--clr-medio); }
 .progress-bar-wrapper { display: flex; flex-direction: column; gap: 5px; font-size: .75rem; color: var(--clr-muted); }
 .progress-bar-track { height: 7px; background: var(--clr-surface-2); border-radius: 99px; overflow: hidden; }
 .progress-bar-fill { height: 100%; border-radius: 99px; transition: width .6s ease; }
+.nivel-inactivo .progress-bar-fill { background: var(--clr-muted); opacity: 0.5; }
 .nivel-critico .progress-bar-fill { background: linear-gradient(90deg, var(--clr-critico), #ff8c00); }
 .nivel-alto    .progress-bar-fill { background: linear-gradient(90deg, var(--clr-alto), var(--clr-critico)); }
 .nivel-medio   .progress-bar-fill { background: linear-gradient(90deg, var(--clr-medio), #ff9f43); }
-.estado-upstream { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-radius: var(--radius-sm); font-size: .82rem; font-weight: 600; border: 1px solid transparent; }
-.tag-critico { background: rgba(255,71,87,.1); border-color: rgba(255,71,87,.35); color: #ff8a94; }
+.estado-upstream {
+  margin-top: 10px; padding: 12px 18px; border-radius: var(--radius-sm);
+  display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: .88rem;
+  border: 1px solid transparent;
+}
+.tag-inactivo { color: var(--clr-muted); background: rgba(122,130,153,.1); border-color: rgba(122,130,153,.2); }
+.tag-critico { color: var(--clr-critico); background: rgba(255,71,87,.1); border-color: rgba(255,71,87,.2); }
 .tag-critico svg { stroke: var(--clr-critico); }
 .tag-alto    { background: rgba(255,107,53,.1); border-color: rgba(255,107,53,.35); color: #ffb39a; }
 .tag-alto svg { stroke: var(--clr-alto); }
