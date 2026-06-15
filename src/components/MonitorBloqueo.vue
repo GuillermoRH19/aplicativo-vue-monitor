@@ -13,16 +13,16 @@ const CONFIG = {
   // ── Campos usados para el ranking de actividad ────────────
   // deviceCode = identificador del ESP32 (esp32-001, esp32-002, …)
   CAMPOS_TOP: {
-    DEVICE_ID: 'deviceCode',
+    DEVICE_ID: 'DeviceCode',
     COUNT: null,
   },
 
   // ── Campos usados para la tabla de historial ──────────────
   CAMPOS_REGISTROS: {
-    ID_REGISTRO: 'id',          // UUID del evento enviado por Kafka
-    DEVICE_ID:   'deviceCode',  // Código del ESP32 (ej. esp32-001)
-    VALOR:       'value',       // Valor numérico del sensor
-    FECHA:       'timestamp',   // Timestamp ISO 8601 del evento
+    ID_REGISTRO: 'Id',          // UUID del evento enviado por Kafka
+    DEVICE_ID:   'DeviceCode',  // Código del ESP32 (ej. esp32-001)
+    VALOR:       'Value',       // Valor numérico del sensor
+    FECHA:       'Timestamp',   // Timestamp ISO 8601 del evento
   },
 
   // ── CONFIGURACIÓN DE SENSORES para las gráficas ──────────
@@ -31,24 +31,24 @@ const CONFIG = {
   // Como cada documento tiene un solo sensorType, filtramos por tipo:
   SENSORES: {
     // Sensor 1: Temperatura
-    CAMPO_S1:  'value',         // Campo numérico real en el documento
-    FILTER_S1: 'temperature',   // Filtrar documentos donde sensorType === este valor
+    CAMPO_S1:  'Value',
+    FILTER_S1: 'temperature',
     LABEL_S1:  'Temperatura',
     UNIDAD_S1: '°C',
     COLOR_S1:  '#ff4757',
 
     // Sensor 2: Humedad
-    CAMPO_S2:  'value',
+    CAMPO_S2:  'Value',
     FILTER_S2: 'humidity',
     LABEL_S2:  'Humedad',
     UNIDAD_S2: '%',
     COLOR_S2:  '#6c8efb',
 
-    // Sensor 3: Presión
-    CAMPO_S3:  'value',
-    FILTER_S3: 'pressure',
-    LABEL_S3:  'Presión',
-    UNIDAD_S3: 'hPa',
+    // Sensor 3: Distancia
+    CAMPO_S3:  'Value',
+    FILTER_S3: 'distance',
+    LABEL_S3:  'Distancia',
+    UNIDAD_S3: 'cm',
     COLOR_S3:  '#2ed573',
   },
 
@@ -83,13 +83,8 @@ const ultimaActTabla = ref(null)
 
 const contadorPoll   = ref(0)
 
-// ── Estado: inactividad global ──
-const ultimoIdRecibido = ref(null)
-const primeraCarga     = ref(true)
-const estaInactivo     = ref(false)
-
-// ── Estado: Inventario de Dispositivos Individuales ──
-const estadosDispositivos = ref({}) // { 'deviceId': { idMasReciente: '...', activo: true } }
+// ── Estado: Inventario de Dispositivos ──
+const estadosDispositivos = ref({}) // { 'DeviceCode': { activo: true, registros: N } }
 
 // ── Estado: datos de gráficas ──
 const graficasListas = ref(false)
@@ -150,52 +145,25 @@ async function fetchTodos() {
     const data = await res.json()
     const lista = Array.isArray(data) ? data : data?.results ?? data?.data ?? []
     
-    // ── Lógica de detección de inactividad ──
-    if (lista.length > 0) {
-      // El último elemento de la lista es el más reciente (porque el backend lo invierte)
-      const idMasReciente = lista[lista.length - 1][CONFIG.CAMPOS_REGISTROS.ID_REGISTRO] || lista[lista.length - 1][CONFIG.CAMPOS_REGISTROS.FECHA]
-      if (primeraCarga.value) {
-        ultimoIdRecibido.value = idMasReciente
-        primeraCarga.value = false
-        estaInactivo.value = false
-      } else {
-        if (ultimoIdRecibido.value === idMasReciente) {
-          estaInactivo.value = true // No ha llegado nada nuevo
-        } else {
-          estaInactivo.value = false
-          ultimoIdRecibido.value = idMasReciente
-        }
-      }
+    // ── Construir inventario de dispositivos (presencia = activo) ──
+    const dispositivosEnCiclo = {}
+    lista.forEach(item => {
+      const dId = item[CONFIG.CAMPOS_REGISTROS.DEVICE_ID] ?? 'desconocido'
+      dispositivosEnCiclo[dId] = (dispositivosEnCiclo[dId] ?? 0) + 1
+    })
 
-      // ── Lógica de Inventario Individual de Dispositivos ──
-      const ultimosIdsPorDispositivo = {}
-      lista.forEach(item => {
-        const dId = item[CONFIG.CAMPOS_REGISTROS.DEVICE_ID] ?? 'desconocido'
-        const rId = item[CONFIG.CAMPOS_REGISTROS.ID_REGISTRO] || item[CONFIG.CAMPOS_REGISTROS.FECHA]
-        ultimosIdsPorDispositivo[dId] = rId
-      })
-
-      for (const dId in ultimosIdsPorDispositivo) {
-        const nuevoId = ultimosIdsPorDispositivo[dId]
-        if (!estadosDispositivos.value[dId]) {
-          estadosDispositivos.value[dId] = { idMasReciente: nuevoId, activo: true }
-        } else {
-          const oldState = estadosDispositivos.value[dId]
-          if (oldState.idMasReciente === nuevoId) {
-            oldState.activo = false
-          } else {
-            oldState.idMasReciente = nuevoId
-            oldState.activo = true
-          }
-        }
-      }
-      // Marcar inactivos los que cayeron fuera de la ventana
-      for (const dId in estadosDispositivos.value) {
-        if (!ultimosIdsPorDispositivo[dId]) {
-          estadosDispositivos.value[dId].activo = false
-        }
+    // Todos los que aparecen en esta consulta están activos
+    const nuevoEstado = {}
+    for (const dId in dispositivosEnCiclo) {
+      nuevoEstado[dId] = { activo: true, registros: dispositivosEnCiclo[dId] }
+    }
+    // Los que estaban antes pero ya no aparecen, quedan inactivos
+    for (const dId in estadosDispositivos.value) {
+      if (!nuevoEstado[dId]) {
+        nuevoEstado[dId] = { activo: false, registros: 0 }
       }
     }
+    estadosDispositivos.value = nuevoEstado
 
     registros.value = lista
     estadoTabla.value = lista.length ? 'ok' : 'sin-datos'
@@ -219,7 +187,7 @@ async function fetchTodos() {
 function parsearSensor(lista, campo, filtroTipo, semilla) {
   if (campo) {
     const sublista = filtroTipo
-      ? lista.filter(i => i.sensorType === filtroTipo)
+      ? lista.filter(i => i.SensorType === filtroTipo)
       : lista
     const vals = sublista.map(i => parseFloat(i[campo])).filter(v => !isNaN(v))
     if (vals.length) return vals[vals.length - 1]
@@ -235,16 +203,9 @@ function actualizarDatosSensores(lista) {
   const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   const max = CONFIG.MAX_PUNTOS_GRAFICA
 
-  let s1 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S1, CONFIG.SENSORES.FILTER_S1, 22)
-  let s2 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S2, CONFIG.SENSORES.FILTER_S2, 60)
-  let s3 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S3, CONFIG.SENSORES.FILTER_S3, 1013)
-
-  // Si está inactivo, atenuar/limpiar la gráfica insertando nulls
-  if (estaInactivo.value) {
-    s1 = null
-    s2 = null
-    s3 = null
-  }
+  const s1 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S1, CONFIG.SENSORES.FILTER_S1, 22)
+  const s2 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S2, CONFIG.SENSORES.FILTER_S2, 60)
+  const s3 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S3, CONFIG.SENSORES.FILTER_S3, 1013)
 
   historialTiempos.value.push(ahora)
   historialS1.value.push(s1)
@@ -411,8 +372,6 @@ const inactivosInventario = computed(() => totalInventario.value - activosInvent
 
 // ── Nivel de alerta ──
 const nivelAlerta = computed(() => {
-  if (estaInactivo.value) return 'inactivo'
-  
   const p = dispositivoAlerta.value?.porcentaje ?? 0
   if (p >= 70) return 'critico'
   if (p >= 40) return 'alto'
@@ -631,7 +590,7 @@ onUnmounted(() => {
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
             <span>Dispositivos</span>
           </div>
-          <div class="metric-value" style="color: #6c8efb">{{ estaInactivo ? 0 : Object.keys(conteoDispositivos).length }}<span class="metric-unit">activos</span></div>
+          <div class="metric-value" style="color: #6c8efb">{{ activosInventario }}<span class="metric-unit">activos</span></div>
           <div class="metric-sparkline" style="background: rgba(108,142,251,.08); border-color: rgba(108,142,251,.2)">
             <span class="metric-trend">Puntos en gráfica: {{ historialTiempos.length }}/{{ CONFIG.MAX_PUNTOS_GRAFICA }}</span>
           </div>
