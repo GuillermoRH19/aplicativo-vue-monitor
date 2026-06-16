@@ -1,5 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { Chart, registerables } from 'chart.js'
+Chart.register(...registerables)
 
 // ============================================================
 //  CONFIGURACIÓN — Edita aquí tus parámetros
@@ -227,14 +229,14 @@ function actualizarDatosSensores(lista) {
 //  Chart.js — inicializar gráficas
 // ────────────────────────────────────────────────────────────
 function inicializarGraficas() {
-  if (!window.Chart) return
-  window.Chart.defaults.color = '#7a8299'
-  window.Chart.defaults.font.family = "'Inter', 'Segoe UI', sans-serif"
+  Chart.defaults.color = '#7a8299'
+  Chart.defaults.font.family = "'Inter', 'Segoe UI', sans-serif"
+
 
   // 1. Gráfica de líneas: sensores en tiempo real
   const ctxLinea = document.getElementById('chartLinea')
   if (ctxLinea) {
-    chartLinea = new window.Chart(ctxLinea, {
+    chartLinea = new Chart(ctxLinea, {
       type: 'line',
       data: {
         labels: [],
@@ -289,7 +291,7 @@ function inicializarGraficas() {
   // 2. Gráfica de barras: registros por dispositivo
   const ctxBarras = document.getElementById('chartBarras')
   if (ctxBarras) {
-    chartBarras = new window.Chart(ctxBarras, {
+    chartBarras = new Chart(ctxBarras, {
       type: 'bar',
       data: { labels: [], datasets: [{ label: 'Registros', data: [], backgroundColor: [], borderRadius: 6, borderSkipped: false }] },
       options: {
@@ -306,7 +308,7 @@ function inicializarGraficas() {
   // 3. Dona: distribución de tráfico
   const ctxDona = document.getElementById('chartDona')
   if (ctxDona) {
-    chartDona = new window.Chart(ctxDona, {
+    chartDona = new Chart(ctxDona, {
       type: 'doughnut',
       data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderColor: '#13161e', borderWidth: 3, hoverOffset: 8 }] },
       options: {
@@ -400,20 +402,9 @@ function getCampo(item, campo) {
 }
 
 // ────────────────────────────────────────────────────────────
-//  Carga de Chart.js y arranque
+//  Arranque
 // ────────────────────────────────────────────────────────────
-function cargarChartJS() {
-  return new Promise((resolve) => {
-    if (window.Chart) { resolve(); return }
-    const s = document.createElement('script')
-    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js'
-    s.onload = resolve
-    document.head.appendChild(s)
-  })
-}
-
 onMounted(async () => {
-  await cargarChartJS()
   await nextTick()
   inicializarGraficas()
   pollCiclo()
