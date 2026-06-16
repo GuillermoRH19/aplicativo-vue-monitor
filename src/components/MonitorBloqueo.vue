@@ -144,36 +144,37 @@ async function fetchTodos() {
     if (!res.ok) throw new Error(`HTTP ${res.status} — ${res.statusText}`)
     const data = await res.json()
     const lista = Array.isArray(data) ? data : data?.results ?? data?.data ?? []
-    
-    // ── Construir inventario de dispositivos (presencia = activo) ──
+
     const dispositivosEnCiclo = {}
+
     lista.forEach(item => {
-      const dId = item[CONFIG.CAMPOS_REGISTROS.DEVICE_ID] ?? 'desconocido'
+      const dId = item[CONFIG.CAMPOS_REGISTROS.DEVICE_ID]
+      if (!dId || String(dId).trim() === '') return
       dispositivosEnCiclo[dId] = (dispositivosEnCiclo[dId] ?? 0) + 1
     })
 
-    // Todos los que aparecen en esta consulta están activos
     const nuevoEstado = {}
     for (const dId in dispositivosEnCiclo) {
-      nuevoEstado[dId] = { activo: true, registros: dispositivosEnCiclo[dId] }
-    }
-    // Los que estaban antes pero ya no aparecen, quedan inactivos
-    for (const dId in estadosDispositivos.value) {
-      if (!nuevoEstado[dId]) {
-        nuevoEstado[dId] = { activo: false, registros: 0 }
+      nuevoEstado[dId] = {
+        activo: true,
+        registros: dispositivosEnCiclo[dId],
       }
     }
+
     estadosDispositivos.value = nuevoEstado
+    conteoDispositivos.value = dispositivosEnCiclo
 
     registros.value = lista
     estadoTabla.value = lista.length ? 'ok' : 'sin-datos'
     ultimaActTabla.value = new Date().toLocaleTimeString('es-MX')
     actualizarDatosSensores(lista)
   } catch (err) {
-    estadoTabla.value = 'error'; errorTabla.value = err.message ?? 'Error desconocido'
+    estadoTabla.value = 'error'
+    errorTabla.value = err.message ?? 'Error desconocido'
+    estadosDispositivos.value = {}
+    conteoDispositivos.value = {}
   }
 }
-
 // ────────────────────────────────────────────────────────────
 //  Actualizar datos de sensores para gráficas
 //  Cada documento de Kafka tiene: sensorType (temperature/humidity/pressure)
@@ -549,54 +550,6 @@ onUnmounted(() => {
           LIVE
         </span>
       </div>
-
-      <!-- Tarjetas métricas de sensores -->
-      <div class="sensor-metrics">
-        <div class="sensor-metric-card" :style="{ '--accent': CONFIG.SENSORES.COLOR_S1 }">
-          <div class="metric-header">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
-            <span>{{ CONFIG.SENSORES.LABEL_S1 }}</span>
-          </div>
-          <div class="metric-value">{{ ultimoS1 }}<span class="metric-unit">{{ CONFIG.SENSORES.UNIDAD_S1 }}</span></div>
-          <div class="metric-sparkline" :style="{ background: CONFIG.SENSORES.COLOR_S1 + '22', borderColor: CONFIG.SENSORES.COLOR_S1 + '44' }">
-            <span class="metric-trend">↻ Actualización cada {{ CONFIG.POLLING_INTERVAL_MS / 1000 }}s</span>
-          </div>
-        </div>
-
-        <div class="sensor-metric-card" :style="{ '--accent': CONFIG.SENSORES.COLOR_S2 }">
-          <div class="metric-header">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
-            <span>{{ CONFIG.SENSORES.LABEL_S2 }}</span>
-          </div>
-          <div class="metric-value">{{ ultimoS2 }}<span class="metric-unit">{{ CONFIG.SENSORES.UNIDAD_S2 }}</span></div>
-          <div class="metric-sparkline" :style="{ background: CONFIG.SENSORES.COLOR_S2 + '22', borderColor: CONFIG.SENSORES.COLOR_S2 + '44' }">
-            <span class="metric-trend">↻ Actualización cada {{ CONFIG.POLLING_INTERVAL_MS / 1000 }}s</span>
-          </div>
-        </div>
-
-        <div class="sensor-metric-card" :style="{ '--accent': CONFIG.SENSORES.COLOR_S3 }">
-          <div class="metric-header">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            <span>{{ CONFIG.SENSORES.LABEL_S3 }}</span>
-          </div>
-          <div class="metric-value">{{ ultimoS3 }}<span class="metric-unit">{{ CONFIG.SENSORES.UNIDAD_S3 }}</span></div>
-          <div class="metric-sparkline" :style="{ background: CONFIG.SENSORES.COLOR_S3 + '22', borderColor: CONFIG.SENSORES.COLOR_S3 + '44' }">
-            <span class="metric-trend">↻ Actualización cada {{ CONFIG.POLLING_INTERVAL_MS / 1000 }}s</span>
-          </div>
-        </div>
-
-        <div class="sensor-metric-card sensor-metric-info">
-          <div class="metric-header">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-            <span>Dispositivos</span>
-          </div>
-          <div class="metric-value" style="color: #6c8efb">{{ activosInventario }}<span class="metric-unit">activos</span></div>
-          <div class="metric-sparkline" style="background: rgba(108,142,251,.08); border-color: rgba(108,142,251,.2)">
-            <span class="metric-trend">Puntos en gráfica: {{ historialTiempos.length }}/{{ CONFIG.MAX_PUNTOS_GRAFICA }}</span>
-          </div>
-        </div>
-      </div>
-
       <!-- Leyenda de sensores -->
       <div class="sensor-legend">
         <div class="legend-item" v-for="(s, i) in [
