@@ -96,6 +96,9 @@ const historialS2  = ref([])
 const historialS3  = ref([])
 const conteoDispositivos = ref({}) // { deviceId: count }
 
+// ── Datos raw de la API (array completo) para el grid ──
+const rawLista = ref([])
+
 let chartLinea    = null
 let chartBarras   = null
 let chartDona     = null
@@ -165,6 +168,7 @@ async function fetchTodos() {
 
     estadosDispositivos.value = nuevoEstado
     conteoDispositivos.value = dispositivosEnCiclo
+    rawLista.value = lista
 
     registros.value = lista
     estadoTabla.value = lista.length ? 'ok' : 'sin-datos'
@@ -175,6 +179,7 @@ async function fetchTodos() {
     errorTabla.value = err.message ?? 'Error desconocido'
     estadosDispositivos.value = {}
     conteoDispositivos.value = {}
+    rawLista.value = []
   }
 }
 // ────────────────────────────────────────────────────────────
@@ -373,7 +378,7 @@ const totalInventario = computed(() => Object.keys(estadosDispositivos.value).le
 const activosInventario = computed(() => Object.values(estadosDispositivos.value).filter(s => s.activo).length)
 const inactivosInventario = computed(() => totalInventario.value - activosInventario.value)
 
-// ── Nivel de alerta ──
+// ── Nivel de alerta (para compatibilidad con ranking/dona) ──
 const nivelAlerta = computed(() => {
   const p = dispositivoAlerta.value?.porcentaje ?? 0
   if (p >= 70) return 'critico'
@@ -381,18 +386,60 @@ const nivelAlerta = computed(() => {
   return 'medio'
 })
 
-const etiquetaEstado = computed(() => {
-  const n = nivelAlerta.value
-  if (n === 'inactivo') return { texto: 'INACTIVO / SIN TRÁFICO RECIENTE', clase: 'tag-inactivo' }
-  if (n === 'critico')  return { texto: 'Tráfico Excedido — Requiere Bloqueo Upstream', clase: 'tag-critico' }
-  if (n === 'alto')     return { texto: 'Tráfico Elevado — Monitorear Upstream', clase: 'tag-alto' }
-  return { texto: 'Tráfico Normal — Sin Acción Requerida', clase: 'tag-medio' }
-})
-
 // Último valor de cada sensor (para las tarjetas métricas)
 const ultimoS1 = computed(() => historialS1.value[historialS1.value.length - 1] ?? '—')
 const ultimoS2 = computed(() => historialS2.value[historialS2.value.length - 1] ?? '—')
 const ultimoS3 = computed(() => historialS3.value[historialS3.value.length - 1] ?? '—')
+
+// ──────────────────────────────────────────────────────────────
+//  GRID DE DISPOSITIVOS
+//  Agrupa el array raw por DeviceCode y extrae el último valor
+//  de cada tipo de sensor para mostrarlo en las cards.
+// ──────────────────────────────────────────────────────────────
+const SENSOR_DEFS = [
+  { tipo: CONFIG.SENSORES.FILTER_S1, label: CONFIG.SENSORES.LABEL_S1, unidad: CONFIG.SENSORES.UNIDAD_S1, color: CONFIG.SENSORES.COLOR_S1, icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.31-8.86c-1.77-.45-2.34-.94-2.34-1.67 0-.84.79-1.43 2.1-1.43 1.38 0 1.9.66 1.94 1.64h1.71c-.05-1.34-.87-2.57-2.49-2.97V5H10.9v1.69c-1.51.32-2.72 1.3-2.72 2.81 0 1.79 1.48 2.68 3.66 3.19 1.95.46 2.34 1.15 2.34 1.86 0 .53-.39 1.38-2.1 1.38-1.6 0-2.23-.72-2.32-1.64H8.04c.1 1.7 1.37 2.66 2.86 2.97V19h2.34v-1.67c1.52-.29 2.72-1.16 2.73-2.77-.01-2.2-1.9-2.96-3.66-3.42z' },
+  { tipo: CONFIG.SENSORES.FILTER_S2, label: CONFIG.SENSORES.LABEL_S2, unidad: CONFIG.SENSORES.UNIDAD_S2, color: CONFIG.SENSORES.COLOR_S2, icon: 'M12 2a5 5 0 0 1 5 5v6a5 5 0 0 1-10 0V7a5 5 0 0 1 5-5zm0 15a7 7 0 0 0 7-7H5a7 7 0 0 0 7 7zm0 2v2m-3 0h6' },
+  { tipo: CONFIG.SENSORES.FILTER_S3, label: CONFIG.SENSORES.LABEL_S3, unidad: CONFIG.SENSORES.UNIDAD_S3, color: CONFIG.SENSORES.COLOR_S3, icon: 'M2 12h20M12 2v20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07' },
+]
+
+const dispositivosGrid = computed(() => {
+  const mapa = {} // { deviceId: { id, registros, activo, sensores: { tipo: valor } } }
+
+  rawLista.value.forEach(item => {
+    const dId       = item[CONFIG.CAMPOS_REGISTROS.DEVICE_ID] ?? 'desconocido'
+    const sensorType = (item.SensorType ?? '').toLowerCase()
+    const value      = parseFloat(item[CONFIG.CAMPOS_REGISTROS.VALOR])
+
+    if (!mapa[dId]) {
+      mapa[dId] = {
+        id: dId,
+        registros: 0,
+        activo: true,
+        ultimaActualizacion: item[CONFIG.CAMPOS_REGISTROS.FECHA] ?? null,
+        sensores: {},
+      }
+    }
+    mapa[dId].registros++
+    // Guardamos el último valor (el array ya viene ordenado del más viejo al más nuevo)
+    if (sensorType && !isNaN(value)) {
+      mapa[dId].sensores[sensorType] = value
+    }
+    if (item[CONFIG.CAMPOS_REGISTROS.FECHA]) {
+      mapa[dId].ultimaActualizacion = item[CONFIG.CAMPOS_REGISTROS.FECHA]
+    }
+  })
+
+  // Ordenar por cantidad de registros descendente
+  return Object.values(mapa).sort((a, b) => b.registros - a.registros)
+})
+
+// Formatea el timestamp para mostrarlo en la card
+function formatTimestamp(ts) {
+  if (!ts) return '—'
+  try {
+    return new Date(ts).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  } catch { return ts }
+}
 
 function getCampo(item, campo) {
   const key = CONFIG.CAMPOS_REGISTROS[campo]
@@ -440,92 +487,116 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <!-- ── Body: tarjeta de alerta + ranking ───────── -->
-    <div class="monitor-body">
-      <div v-if="estadoTop === 'cargando'" class="estado-card estado-cargando">
+    <!-- ══════════════════════════════════════════════════
+         GRID DE DISPOSITIVOS CONECTADOS
+    ═══════════════════════════════════════════════════ -->
+    <section class="devices-section">
+      <!-- Header de la sección -->
+      <div class="devices-section-header">
+        <div class="devices-section-title">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          <h2>Dispositivos Conectados</h2>
+        </div>
+        <div class="devices-section-meta">
+          <span class="badge-pill badge-live"><span class="live-dot"></span>LIVE</span>
+          <span class="badge-pill">Total: {{ dispositivosGrid.length }}</span>
+          <span class="badge-pill tag-activo-pill">Activos: {{ dispositivosGrid.filter(d => d.activo).length }}</span>
+          <span v-if="ultimaActTabla" class="badge-pill">
+            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            {{ ultimaActTabla }}
+          </span>
+        </div>
+      </div>
+
+      <!-- Estado: cargando -->
+      <div v-if="estadoTabla === 'idle' || estadoTabla === 'cargando'" class="devices-estado">
         <div class="spinner"></div>
-        <p>Consultando API…</p>
-        <small>{{ CONFIG.URL_API_TOP }}</small>
+        <span>Consultando dispositivos…</span>
       </div>
 
-      <div v-else-if="estadoTop === 'error'" class="estado-card estado-error">
-        <div class="estado-icon">⚠️</div>
-        <h2>Error de conexión</h2>
-        <p>{{ errorTop }}</p>
-        <button class="btn-retry" @click="fetchTop">Reintentar</button>
-      </div>
-
-      <div v-else-if="estadoTop === 'sin-datos'" class="estado-card">
-        <div class="estado-icon">📭</div>
-        <h2>Sin datos disponibles</h2>
-        <p>La API respondió pero no devolvió registros.</p>
-      </div>
-
-      <div v-else-if="estadoTop === 'ok' && dispositivoAlerta" class="alerta-wrapper">
-        <!-- Tarjeta principal -->
-        <div class="alerta-card" :class="`nivel-${nivelAlerta}`">
-          <div class="alerta-badge">
-            <span v-if="nivelAlerta === 'inactivo'">⚪ INACTIVO</span>
-            <span v-else-if="nivelAlerta === 'critico'">🔴 CRÍTICO</span>
-            <span v-else-if="nivelAlerta === 'alto'">🟠 ALTO</span>
-            <span v-else>🟡 MEDIO</span>
-          </div>
-          <div class="alerta-titulo">
-            <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            <span>Dispositivo con mayor actividad detectado</span>
-          </div>
-          <div class="alerta-device-id">
-            <label>{{ CONFIG.LABELS.DEVICE }}</label>
-            <div class="device-id-value">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="7" width="6" height="10" rx="1"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
-              <strong>{{ dispositivoAlerta.id }}</strong>
-            </div>
-          </div>
-          <div class="alerta-stats">
-            <div class="stat-item">
-              <span class="stat-label">{{ CONFIG.LABELS.COUNT }}</span>
-              <span class="stat-value">{{ dispositivoAlerta.count.toLocaleString() }}</span>
-            </div>
-            <div class="stat-item">
-              <span class="stat-label">% del tráfico total</span>
-              <span class="stat-value">{{ dispositivoAlerta.porcentaje }}%</span>
-            </div>
-          </div>
-          <div class="progress-bar-wrapper">
-            <div class="progress-bar-track">
-              <div class="progress-bar-fill" :style="{ width: dispositivoAlerta.porcentaje + '%' }"></div>
-            </div>
-            <span>{{ dispositivoAlerta.porcentaje }}% del tráfico total</span>
-          </div>
-          <div class="estado-upstream" :class="etiquetaEstado.clase">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            <span>Estado: {{ etiquetaEstado.texto }}</span>
-          </div>
+      <!-- Estado: error -->
+      <div v-else-if="estadoTabla === 'error'" class="devices-estado devices-error">
+        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <div>
+          <p>Error de conexión</p>
+          <small>{{ errorTabla }}</small>
         </div>
+        <button class="btn-retry" @click="fetchTodos">Reintentar</button>
+      </div>
 
-        <!-- Ranking Top 5 -->
-        <div class="ranking-card">
-          <h3>
-            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-            Ranking de actividad (Top 5)
-          </h3>
-          <ul class="ranking-list">
-            <li
-              v-for="([id, count], idx) in dispositivoAlerta.rankingCompleto"
-              :key="id"
-              :class="{ 'ranking-top': idx === 0 }"
+      <!-- Estado: sin datos -->
+      <div v-else-if="estadoTabla === 'sin-datos' || dispositivosGrid.length === 0" class="devices-estado">
+        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        <span>No hay dispositivos detectados aún.</span>
+      </div>
+
+      <!-- GRID de cards -->
+      <div v-else class="devices-grid">
+        <div
+          v-for="(dev, idx) in dispositivosGrid"
+          :key="dev.id"
+          class="dcard"
+          :class="{ 'dcard--top': idx === 0, 'dcard--inactivo': !dev.activo }"
+          :style="{ '--dcard-accent': PALETA[idx % PALETA.length] }"
+        >
+          <!-- Header de la card -->
+          <div class="dcard__header">
+            <div class="dcard__id-wrap">
+              <span class="dcard__status-dot" :class="dev.activo ? 'dot--activo' : 'dot--inactivo'"></span>
+              <span class="dcard__id">{{ dev.id }}</span>
+              <span v-if="idx === 0" class="dcard__crown" title="Mayor actividad">👑</span>
+            </div>
+            <span class="dcard__badge" :class="dev.activo ? 'badge--activo' : 'badge--inactivo'">
+              {{ dev.activo ? 'Activo' : 'Inactivo' }}
+            </span>
+          </div>
+
+          <!-- Conteo de registros -->
+          <div class="dcard__count">
+            <span class="dcard__count-num">{{ dev.registros.toLocaleString() }}</span>
+            <span class="dcard__count-label">registros</span>
+          </div>
+
+          <!-- Barra de actividad relativa -->
+          <div class="dcard__progress">
+            <div
+              class="dcard__progress-fill"
+              :style="{
+                width: dispositivosGrid[0]?.registros
+                  ? Math.round((dev.registros / dispositivosGrid[0].registros) * 100) + '%'
+                  : '0%',
+                background: PALETA[idx % PALETA.length]
+              }"
+            ></div>
+          </div>
+
+          <!-- Valores de sensores -->
+          <div class="dcard__sensors">
+            <div
+              v-for="sensor in SENSOR_DEFS"
+              :key="sensor.tipo"
+              class="dcard__sensor-chip"
+              :style="{ '--chip-color': sensor.color }"
             >
-              <span class="rank-pos">{{ idx + 1 }}</span>
-              <span class="rank-id">{{ id }}</span>
-              <span class="rank-count">{{ count.toLocaleString() }}</span>
-              <div class="rank-bar">
-                <div class="rank-bar-fill" :style="{ width: Math.round((count / dispositivoAlerta.rankingCompleto[0][1]) * 100) + '%' }"></div>
-              </div>
-            </li>
-          </ul>
+              <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path :d="sensor.icon"/>
+              </svg>
+              <span class="dcard__sensor-label">{{ sensor.label }}</span>
+              <span class="dcard__sensor-val">
+                {{ dev.sensores[sensor.tipo] != null ? dev.sensores[sensor.tipo] : '—' }}
+                <em v-if="dev.sensores[sensor.tipo] != null">{{ sensor.unidad }}</em>
+              </span>
+            </div>
+          </div>
+
+          <!-- Timestamp última lectura -->
+          <div class="dcard__footer">
+            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <span>Última lectura: {{ formatTimestamp(dev.ultimaActualizacion) }}</span>
+          </div>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- ═══════════════════════════════════════════════
          SECCIÓN DE GRÁFICAS DE SENSORES EN TIEMPO REAL
@@ -606,35 +677,7 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <!-- ── Inventario de Dispositivos ── -->
-    <section class="inventario-section">
-      <div class="inventario-header">
-        <h2>
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h16M4 14h16M4 6h16M4 18h16"/></svg>
-          Inventario de Dispositivos Conectados
-        </h2>
-        <div class="inventario-stats">
-          <span class="badge-pill">Total: {{ totalInventario }}</span>
-          <span class="badge-pill tag-activo">Activos: {{ activosInventario }}</span>
-          <span class="badge-pill tag-inactivo">Inactivos: {{ inactivosInventario }}</span>
-        </div>
-      </div>
-      
-      <div class="inventario-grid">
-        <div v-for="(estado, id) in estadosDispositivos" :key="id" class="device-card" :class="{ 'device-inactivo': !estado.activo }">
-          <div class="device-card-header">
-            <span class="device-dot" :class="estado.activo ? 'dot-activo' : 'dot-inactivo'"></span>
-            <span class="device-id-text">{{ id }}</span>
-          </div>
-          <div class="device-card-status" :class="estado.activo ? 'text-activo' : 'text-inactivo'">
-            {{ estado.activo ? 'Activo' : 'Inactivo' }}
-          </div>
-        </div>
-        <div v-if="totalInventario === 0" class="empty-state">
-          No hay dispositivos detectados en el sistema.
-        </div>
-      </div>
-    </section>
+    <!-- El inventario ahora está integrado en el Grid de Dispositivos de arriba -->
 
     <!-- ── Tabla de últimos registros ── -->
     <section class="historial-section">
@@ -855,6 +898,176 @@ onUnmounted(() => {
 .rank-bar { grid-column: 1/-1; height: 4px; background: var(--clr-surface-2); border-radius: 99px; overflow: hidden; }
 .rank-bar-fill { height: 100%; background: var(--clr-accent); border-radius: 99px; transition: width .6s ease; }
 .ranking-top .rank-bar-fill { background: var(--clr-critico); }
+
+/* ══════════════════════════════════════════════════
+   GRID DE DISPOSITIVOS
+══════════════════════════════════════════════════ */
+.devices-section {
+  margin: 24px 32px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.devices-section-header {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--clr-border);
+}
+.devices-section-title {
+  display: flex; align-items: center; gap: 10px;
+}
+.devices-section-title svg { stroke: var(--clr-accent); }
+.devices-section-title h2 {
+  font-size: 1rem; font-weight: 700; margin: 0;
+  background: linear-gradient(135deg, #fff 0%, var(--clr-accent) 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+.devices-section-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tag-activo-pill { background: rgba(46,213,115,.08) !important; border-color: rgba(46,213,115,.3) !important; color: var(--clr-success) !important; }
+
+/* Estado vacío / cargando / error */
+.devices-estado {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  padding: 52px 24px;
+  background: var(--clr-surface);
+  border: 1px solid var(--clr-border);
+  border-radius: var(--radius);
+  color: var(--clr-muted);
+  font-size: .875rem;
+  flex-direction: column;
+  text-align: center;
+}
+.devices-estado svg { stroke: var(--clr-muted); opacity: .5; }
+.devices-error { color: #ff8a94; }
+.devices-error svg { stroke: var(--clr-critico); opacity: .8; }
+.devices-error p { margin: 0; font-weight: 600; }
+.devices-error small { color: var(--clr-muted); font-size: .78rem; }
+
+/* Grid responsive */
+.devices-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 18px;
+}
+@media (max-width: 640px) { .devices-grid { grid-template-columns: 1fr; } }
+
+/* Device Card */
+.dcard {
+  --dcard-accent: #6c8efb;
+  background: var(--clr-surface);
+  border: 1px solid var(--clr-border);
+  border-top: 3px solid var(--dcard-accent);
+  border-radius: var(--radius);
+  padding: 20px;
+  display: flex; flex-direction: column; gap: 14px;
+  box-shadow: var(--shadow);
+  transition: transform .2s, box-shadow .2s, border-color .3s;
+  animation: slideUp .35s ease both;
+  position: relative; overflow: hidden;
+}
+.dcard::after {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 60px;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--dcard-accent) 8%, transparent), transparent);
+  pointer-events: none;
+}
+.dcard:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 40px rgba(0,0,0,.5);
+  border-color: var(--dcard-accent);
+}
+.dcard--top {
+  border-top-width: 3px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--dcard-accent) 30%, transparent), var(--shadow);
+}
+.dcard--inactivo { opacity: .55; filter: grayscale(.4); }
+
+/* Card Header */
+.dcard__header {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.dcard__id-wrap {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+}
+.dcard__status-dot {
+  width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+}
+.dot--activo   { background: var(--clr-success); box-shadow: 0 0 0 3px rgba(46,213,115,.2); animation: pulse-ring 2s infinite; }
+.dot--inactivo { background: var(--clr-muted); }
+.dcard__id {
+  font-family: 'Courier New', monospace;
+  font-size: .88rem; font-weight: 700;
+  color: var(--dcard-accent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dcard__crown { font-size: .9rem; flex-shrink: 0; }
+.dcard__badge {
+  font-size: .65rem; font-weight: 700; text-transform: uppercase; letter-spacing: .7px;
+  padding: 3px 9px; border-radius: 20px; flex-shrink: 0;
+}
+.badge--activo   { background: rgba(46,213,115,.12); border: 1px solid rgba(46,213,115,.3); color: var(--clr-success); }
+.badge--inactivo { background: rgba(122,130,153,.1); border: 1px solid rgba(122,130,153,.2); color: var(--clr-muted); }
+
+/* Conteo */
+.dcard__count {
+  display: flex; align-items: baseline; gap: 6px;
+}
+.dcard__count-num {
+  font-size: 2.2rem; font-weight: 800; line-height: 1;
+  color: var(--dcard-accent);
+}
+.dcard__count-label {
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .8px; color: var(--clr-muted);
+}
+
+/* Barra de progreso relativa */
+.dcard__progress {
+  height: 5px;
+  background: var(--clr-surface-2);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.dcard__progress-fill {
+  height: 100%;
+  border-radius: 99px;
+  transition: width .6s ease;
+  opacity: .8;
+}
+
+/* Chips de sensores */
+.dcard__sensors {
+  display: flex; flex-direction: column; gap: 7px;
+}
+.dcard__sensor-chip {
+  --chip-color: #6c8efb;
+  display: flex; align-items: center; gap: 7px;
+  background: var(--clr-surface-2);
+  border: 1px solid var(--clr-border);
+  border-left: 3px solid var(--chip-color);
+  border-radius: 7px;
+  padding: 7px 10px;
+  font-size: .78rem;
+  transition: border-color .2s;
+}
+.dcard__sensor-chip svg { stroke: var(--chip-color); flex-shrink: 0; }
+.dcard__sensor-label { color: var(--clr-muted); flex: 1; text-transform: capitalize; }
+.dcard__sensor-val {
+  font-weight: 700; color: var(--clr-text);
+  display: flex; align-items: baseline; gap: 2px;
+}
+.dcard__sensor-val em { font-style: normal; font-size: .68rem; color: var(--clr-muted); font-weight: 400; }
+
+/* Footer timestamp */
+.dcard__footer {
+  display: flex; align-items: center; gap: 5px;
+  font-size: .68rem; color: var(--clr-muted);
+  border-top: 1px solid var(--clr-border);
+  padding-top: 10px;
+  margin-top: 2px;
+}
+.dcard__footer svg { stroke: var(--clr-muted); flex-shrink: 0; }
 
 /* ══════════════════════════════════════════════════
    GRÁFICAS — Sección nueva
