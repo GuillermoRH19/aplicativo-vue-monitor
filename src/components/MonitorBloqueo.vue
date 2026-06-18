@@ -7,46 +7,36 @@ Chart.register(...registerables)
 //  CONFIGURACIÓN — Edita aquí tus parámetros
 // ============================================================
 const CONFIG = {
-  // ── URLs del backend (se leen de .env.local) ───────────────
-  URL_API_TOP:   import.meta.env.VITE_API_URL_TOP   || 'http://localhost:3000/api/datos?collection=processed_readings',
-  URL_API_TODOS: import.meta.env.VITE_API_URL_TODOS || 'http://localhost:3000/api/datos?collection=processed_readings',
+  URL_API_DATOS:        import.meta.env.VITE_API_URL_DATOS        || 'http://localhost:3001/api/datos?collection=processed_readings&limit=500',
+  URL_API_DISPOSITIVOS: import.meta.env.VITE_API_URL_DISPOSITIVOS || 'http://localhost:3001/api/dispositivos?collection=processed_readings',
   POLLING_INTERVAL_MS: 5000,
+  INACTIVO_UMBRAL_MS:  120_000,
 
-  // ── Campos usados para el ranking de actividad ────────────
-  // deviceCode = identificador del ESP32 (esp32-001, esp32-002, …)
   CAMPOS_TOP: {
     DEVICE_ID: 'DeviceCode',
     COUNT: null,
   },
 
-  // ── Campos usados para la tabla de historial ──────────────
   CAMPOS_REGISTROS: {
-    ID_REGISTRO: 'Id',          // UUID del evento enviado por Kafka
-    DEVICE_ID:   'DeviceCode',  // Código del ESP32 (ej. esp32-001)
-    VALOR:       'Value',       // Valor numérico del sensor
-    FECHA:       'Timestamp',   // Timestamp ISO 8601 del evento
+    ID_REGISTRO: 'Id',
+    DEVICE_ID:   'DeviceCode',
+    VALOR:       'Value',
+    FECHA:       'Timestamp',
   },
 
-  // ── CONFIGURACIÓN DE SENSORES para las gráficas ──────────
-  // Cada sensor kafka envía: sensorType (temperature/humidity/pressure)
-  // y el valor numérico en el campo 'value'.
-  // Como cada documento tiene un solo sensorType, filtramos por tipo:
   SENSORES: {
-    // Sensor 1: Temperatura
     CAMPO_S1:  'Value',
     FILTER_S1: 'temperature',
     LABEL_S1:  'Temperatura',
     UNIDAD_S1: '°C',
     COLOR_S1:  '#ff4757',
 
-    // Sensor 2: Humedad
     CAMPO_S2:  'Value',
     FILTER_S2: 'humidity',
     LABEL_S2:  'Humedad',
     UNIDAD_S2: '%',
     COLOR_S2:  '#6c8efb',
 
-    // Sensor 3: Distancia
     CAMPO_S3:  'Value',
     FILTER_S3: 'distance',
     LABEL_S3:  'Distancia',
@@ -96,28 +86,40 @@ const historialS2  = ref([])
 const historialS3  = ref([])
 const conteoDispositivos = ref({}) // { deviceId: count }
 
-// ── Datos raw de la API (array completo) para el grid ──
-const rawLista = ref([])
+// ── Canvas refs (reemplaza document.getElementById) ──
+const chartLineaRef  = ref(null)
+const chartBarrasRef = ref(null)
+const chartDonaRef   = ref(null)
 
-let chartLinea    = null
-let chartBarras   = null
-let chartDona     = null
-let intervalo     = null
+let chartLinea  = null
+let chartBarras = null
+let chartDona   = null
+let intervalo   = null
 
 // ────────────────────────────────────────────────────────────
-//  FETCH: Top de actividad
+//  FETCH ÚNICO: tabla + ranking + gráficas en una sola petición
 // ────────────────────────────────────────────────────────────
-async function fetchTop() {
-  if (estadoTop.value === 'idle') estadoTop.value = 'cargando'
+async function fetchDatos() {
+  if (estadoTop.value === 'idle')   estadoTop.value   = 'cargando'
+  if (estadoTabla.value === 'idle') estadoTabla.value = 'cargando'
   try {
-    const res = await fetch(CONFIG.URL_API_TOP)
+    const res = await fetch(CONFIG.URL_API_DATOS)
     if (!res.ok) throw new Error(`HTTP ${res.status} — ${res.statusText}`)
     const data = await res.json()
     const lista = Array.isArray(data) ? data : data?.results ?? data?.data ?? []
-    if (!lista.length) { estadoTop.value = 'sin-datos'; dispositivoAlerta.value = null; return }
+
+    registros.value      = lista
+    estadoTabla.value    = lista.length ? 'ok' : 'sin-datos'
+    ultimaActTabla.value = new Date().toLocaleTimeString('es-MX')
+
+    if (!lista.length) {
+      estadoTop.value = 'sin-datos'
+      dispositivoAlerta.value = null
+      return
+    }
 
     const conteo = {}
-    lista.forEach((item) => {
+    lista.forEach(item => {
       const id  = item[CONFIG.CAMPOS_TOP.DEVICE_ID] ?? 'desconocido'
       const val = CONFIG.CAMPOS_TOP.COUNT ? Number(item[CONFIG.CAMPOS_TOP.COUNT]) : 1
       conteo[id] = (conteo[id] ?? 0) + val
@@ -132,55 +134,38 @@ async function fetchTop() {
       porcentaje: Math.round((topCount / lista.length) * 100),
       rankingCompleto: Object.entries(conteo).sort((a, b) => b[1] - a[1]).slice(0, 5),
     }
-    estadoTop.value = 'ok'
+    estadoTop.value    = 'ok'
     ultimaActTop.value = new Date().toLocaleTimeString('es-MX')
+    actualizarDatosSensores(lista)
   } catch (err) {
-    estadoTop.value = 'error'; errorTop.value = err.message ?? 'Error desconocido'
+    const msg = err.message ?? 'Error desconocido'
+    estadoTop.value = 'error'; errorTop.value = msg
+    estadoTabla.value = 'error'; errorTabla.value = msg
   }
 }
 
 // ────────────────────────────────────────────────────────────
-//  FETCH: Lista de registros
+//  FETCH INVENTARIO: todos los dispositivos vía agregación
+//  Garantiza que aparezcan TODOS aunque no estén en los últimos
+//  500 registros. Falla silenciosamente (sección no crítica).
 // ────────────────────────────────────────────────────────────
-async function fetchTodos() {
-  if (estadoTabla.value === 'idle') estadoTabla.value = 'cargando'
+async function fetchDispositivos() {
   try {
-    const res = await fetch(CONFIG.URL_API_TODOS)
-    if (!res.ok) throw new Error(`HTTP ${res.status} — ${res.statusText}`)
-    const data = await res.json()
-    const lista = Array.isArray(data) ? data : data?.results ?? data?.data ?? []
-
-    const dispositivosEnCiclo = {}
-
-    lista.forEach(item => {
-      const dId = item[CONFIG.CAMPOS_REGISTROS.DEVICE_ID]
-      if (!dId || String(dId).trim() === '') return
-      dispositivosEnCiclo[dId] = (dispositivosEnCiclo[dId] ?? 0) + 1
-    })
-
+    const res = await fetch(CONFIG.URL_API_DISPOSITIVOS)
+    if (!res.ok) return
+    const lista = await res.json()
+    const ahora = Date.now()
     const nuevoEstado = {}
-    for (const dId in dispositivosEnCiclo) {
-      nuevoEstado[dId] = {
-        activo: true,
-        registros: dispositivosEnCiclo[dId],
+    lista.forEach(d => {
+      const id     = d.DeviceCode ?? d.deviceCode ?? d._id
+      const lastTs = d.lastTimestamp ? new Date(d.lastTimestamp).getTime() : 0
+      nuevoEstado[id] = {
+        activo:    (ahora - lastTs) < CONFIG.INACTIVO_UMBRAL_MS,
+        registros: d.count ?? 0,
       }
-    }
-
+    })
     estadosDispositivos.value = nuevoEstado
-    conteoDispositivos.value = dispositivosEnCiclo
-    rawLista.value = lista
-
-    registros.value = lista
-    estadoTabla.value = lista.length ? 'ok' : 'sin-datos'
-    ultimaActTabla.value = new Date().toLocaleTimeString('es-MX')
-    actualizarDatosSensores(lista)
-  } catch (err) {
-    estadoTabla.value = 'error'
-    errorTabla.value = err.message ?? 'Error desconocido'
-    estadosDispositivos.value = {}
-    conteoDispositivos.value = {}
-    rawLista.value = []
-  }
+  } catch { /* inventario no crítico */ }
 }
 // ────────────────────────────────────────────────────────────
 //  Actualizar datos de sensores para gráficas
@@ -239,9 +224,8 @@ function inicializarGraficas() {
 
 
   // 1. Gráfica de líneas: sensores en tiempo real
-  const ctxLinea = document.getElementById('chartLinea')
-  if (ctxLinea) {
-    chartLinea = new Chart(ctxLinea, {
+  if (chartLineaRef.value) {
+    chartLinea = new Chart(chartLineaRef.value, {
       type: 'line',
       data: {
         labels: [],
@@ -294,9 +278,8 @@ function inicializarGraficas() {
   }
 
   // 2. Gráfica de barras: registros por dispositivo
-  const ctxBarras = document.getElementById('chartBarras')
-  if (ctxBarras) {
-    chartBarras = new Chart(ctxBarras, {
+  if (chartBarrasRef.value) {
+    chartBarras = new Chart(chartBarrasRef.value, {
       type: 'bar',
       data: { labels: [], datasets: [{ label: 'Registros', data: [], backgroundColor: [], borderRadius: 6, borderSkipped: false }] },
       options: {
@@ -311,9 +294,8 @@ function inicializarGraficas() {
   }
 
   // 3. Dona: distribución de tráfico
-  const ctxDona = document.getElementById('chartDona')
-  if (ctxDona) {
-    chartDona = new Chart(ctxDona, {
+  if (chartDonaRef.value) {
+    chartDona = new Chart(chartDonaRef.value, {
       type: 'doughnut',
       data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderColor: '#13161e', borderWidth: 3, hoverOffset: 8 }] },
       options: {
@@ -370,7 +352,7 @@ function actualizarGraficas() {
 // ────────────────────────────────────────────────────────────
 async function pollCiclo() {
   contadorPoll.value++
-  await Promise.all([fetchTop(), fetchTodos()])
+  await Promise.all([fetchDatos(), fetchDispositivos()])
 }
 
 // ── Computeds de Inventario ──
@@ -403,34 +385,43 @@ const SENSOR_DEFS = [
 ]
 
 const dispositivosGrid = computed(() => {
-  const mapa = {} // { deviceId: { id, registros, activo, sensores: { tipo: valor } } }
+  const ahora = Date.now()
 
-  rawLista.value.forEach(item => {
-    const dId       = item[CONFIG.CAMPOS_REGISTROS.DEVICE_ID] ?? 'desconocido'
+  // Fase 1: extraer valores de sensores y último timestamp de los últimos N registros
+  const mapa = {}
+  registros.value.forEach(item => {
+    const dId        = item[CONFIG.CAMPOS_REGISTROS.DEVICE_ID] ?? 'desconocido'
     const sensorType = (item.SensorType ?? '').toLowerCase()
     const value      = parseFloat(item[CONFIG.CAMPOS_REGISTROS.VALOR])
 
     if (!mapa[dId]) {
-      mapa[dId] = {
-        id: dId,
-        registros: 0,
-        activo: true,
-        ultimaActualizacion: item[CONFIG.CAMPOS_REGISTROS.FECHA] ?? null,
-        sensores: {},
-      }
+      mapa[dId] = { id: dId, lastTs: 0, ultimaActualizacion: null, sensores: {} }
     }
-    mapa[dId].registros++
-    // Guardamos el último valor (el array ya viene ordenado del más viejo al más nuevo)
-    if (sensorType && !isNaN(value)) {
-      mapa[dId].sensores[sensorType] = value
-    }
-    if (item[CONFIG.CAMPOS_REGISTROS.FECHA]) {
-      mapa[dId].ultimaActualizacion = item[CONFIG.CAMPOS_REGISTROS.FECHA]
+    if (sensorType && !isNaN(value)) mapa[dId].sensores[sensorType] = value
+
+    const raw = item[CONFIG.CAMPOS_REGISTROS.FECHA]
+    if (raw) {
+      const ts = new Date(raw).getTime()
+      if (ts > mapa[dId].lastTs) { mapa[dId].lastTs = ts; mapa[dId].ultimaActualizacion = raw }
     }
   })
 
-  // Ordenar por cantidad de registros descendente
-  return Object.values(mapa).sort((a, b) => b.registros - a.registros)
+  // Fase 2: fusionar con el inventario de agregación (conteos reales + TODOS los dispositivos)
+  // Esto garantiza que aparezcan dispositivos que no cayeron en los últimos N registros
+  const inventario = estadosDispositivos.value
+  const todosIds   = new Set([...Object.keys(mapa), ...Object.keys(inventario)])
+
+  return Array.from(todosIds).map(id => {
+    const local = mapa[id] ?? { id, lastTs: 0, ultimaActualizacion: null, sensores: {} }
+    const agg   = inventario[id]
+    return {
+      id,
+      registros:          agg?.registros ?? 0,   // total real desde MongoDB (no solo los últimos N)
+      activo:             agg?.activo ?? (local.lastTs ? (ahora - local.lastTs) < CONFIG.INACTIVO_UMBRAL_MS : false),
+      ultimaActualizacion: local.ultimaActualizacion,
+      sensores:           local.sensores,
+    }
+  }).sort((a, b) => b.registros - a.registros)
 })
 
 // Formatea el timestamp para mostrarlo en la card
@@ -521,7 +512,7 @@ onUnmounted(() => {
           <p>Error de conexión</p>
           <small>{{ errorTabla }}</small>
         </div>
-        <button class="btn-retry" @click="fetchTodos">Reintentar</button>
+        <button class="btn-retry" @click="fetchDatos">Reintentar</button>
       </div>
 
       <!-- Estado: sin datos -->
@@ -634,7 +625,7 @@ onUnmounted(() => {
             Sensores — Historial de tiempo real
           </div>
           <div class="grafica-canvas-wrapper" style="height: 260px">
-            <canvas id="chartLinea" role="img" aria-label="Gráfica de línea con historial de temperatura, humedad y presión en tiempo real">Sin datos aún</canvas>
+            <canvas ref="chartLineaRef" role="img" aria-label="Gráfica de línea con historial de temperatura, humedad y presión en tiempo real">Sin datos aún</canvas>
           </div>
         </div>
 
@@ -645,7 +636,7 @@ onUnmounted(() => {
             Registros por dispositivo
           </div>
           <div class="grafica-canvas-wrapper" style="height: 220px">
-            <canvas id="chartBarras" role="img" aria-label="Gráfica de barras con conteo de registros por dispositivo Arduino">Sin datos aún</canvas>
+            <canvas ref="chartBarrasRef" role="img" aria-label="Gráfica de barras con conteo de registros por dispositivo Arduino">Sin datos aún</canvas>
           </div>
         </div>
 
@@ -657,7 +648,7 @@ onUnmounted(() => {
           </div>
           <div class="grafica-dona-layout">
             <div class="grafica-canvas-wrapper" style="height: 180px; width: 180px; flex-shrink: 0">
-              <canvas id="chartDona" role="img" aria-label="Gráfica de dona mostrando distribución porcentual de tráfico por dispositivo">Sin datos aún</canvas>
+              <canvas ref="chartDonaRef" role="img" aria-label="Gráfica de dona mostrando distribución porcentual de tráfico por dispositivo">Sin datos aún</canvas>
             </div>
             <!-- Leyenda dinámica de la dona -->
             <ul class="dona-legend" v-if="dispositivoAlerta?.rankingCompleto?.length">
@@ -701,7 +692,7 @@ onUnmounted(() => {
       </div>
       <div v-else-if="estadoTabla === 'error'" class="tabla-estado tabla-error">
         <span>{{ errorTabla }}</span>
-        <button class="btn-retry btn-retry-sm" @click="fetchTodos">Reintentar</button>
+        <button class="btn-retry btn-retry-sm" @click="fetchDatos">Reintentar</button>
       </div>
       <div v-else-if="estadoTabla === 'sin-datos'" class="tabla-estado"><span>No hay registros disponibles.</span></div>
 
@@ -737,8 +728,8 @@ onUnmounted(() => {
 
     <!-- ── Footer ─────────────────────────────────── -->
     <footer class="monitor-footer">
-      <span>API Top: <code>{{ CONFIG.URL_API_TOP }}</code></span>
-      <span>API Todos: <code>{{ CONFIG.URL_API_TODOS }}</code></span>
+      <span>API Datos: <code>{{ CONFIG.URL_API_DATOS }}</code></span>
+      <span>API Dispositivos: <code>{{ CONFIG.URL_API_DISPOSITIVOS }}</code></span>
       <span>Polling: <code>{{ CONFIG.POLLING_INTERVAL_MS / 1000 }}s</code></span>
     </footer>
 

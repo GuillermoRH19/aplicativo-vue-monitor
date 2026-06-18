@@ -1,52 +1,50 @@
 require('dotenv').config();
-const express = require('express');
+const express  = require('express');
 const mongoose = require('mongoose');
-const cors = require('cors');
+const cors     = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const PORT     = process.env.PORT || 3000;
 const MONGO_URI = process.env.MONGO_URI;
 
-// Conexión a MongoDB
 mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ Conectado a MongoDB Exitosamente'))
   .catch(err => console.error('❌ Error conectando a MongoDB:', err));
 
-// Esquema genérico y flexible (acepta cualquier estructura de documento)
 const RegistroSchema = new mongoose.Schema({}, { strict: false });
 
-// ──────────────────────────────────────────────────────────
+function getModelo(collectionName) {
+  return mongoose.models[collectionName]
+    || mongoose.model(collectionName, RegistroSchema, collectionName);
+}
+
+// ──────────────────────────────────────────────────────────────────
 //  GET /api/datos
-//  Parámetros opcionales de query:
-//    ?collection=<nombre>    — colección a consultar (default: 'sensor_readings')
-//    ?sensorType=<tipo>      — filtrar por tipo de sensor (temperature, humidity, etc.)
-//    ?deviceCode=<codigo>    — filtrar por dispositivo (esp32-001, etc.)
-//    ?limit=<n>              — cantidad máxima de registros (default: 100)
-// ──────────────────────────────────────────────────────────
+//  ?collection=<nombre>  — colección a consultar (default: sensor_readings)
+//  ?sensorType=<tipo>    — filtrar por SensorType (temperature, humidity…)
+//  ?deviceCode=<codigo>  — filtrar por DeviceCode (esp32-001…)
+//  ?limit=<n>            — máximo de registros   (default: 500)
+// ──────────────────────────────────────────────────────────────────
 app.get('/api/datos', async (req, res) => {
   try {
     const collectionName = req.query.collection || 'sensor_readings';
-    const limit          = parseInt(req.query.limit) || 100;
+    const limit          = parseInt(req.query.limit) || 500;
 
-    // Construir filtro dinámico
     const filtro = {};
-    if (req.query.sensorType) filtro.sensorType = req.query.sensorType;
-    if (req.query.deviceCode)  filtro.deviceCode  = req.query.deviceCode;
+    if (req.query.sensorType) filtro.SensorType = req.query.sensorType;
+    if (req.query.deviceCode) filtro.DeviceCode  = req.query.deviceCode;
 
-    const Modelo = mongoose.models[collectionName]
-      || mongoose.model(collectionName, RegistroSchema, collectionName);
+    const Modelo = getModelo(collectionName);
 
-    // Traer los últimos N registros (más recientes primero por timestamp, luego invertir para gráficas)
     let datos = await Modelo.find(filtro)
-      .sort({ timestamp: -1 })
+      .sort({ Timestamp: -1 })
       .limit(limit)
       .lean();
 
-    datos = datos.reverse(); // Dejar del más viejo al más nuevo (correcto para gráficas de tiempo)
-
+    datos = datos.reverse();
     res.json(datos);
   } catch (error) {
     console.error('Error obteniendo datos:', error);
@@ -54,28 +52,59 @@ app.get('/api/datos', async (req, res) => {
   }
 });
 
-// ──────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────
+//  GET /api/dispositivos
+//  Devuelve TODOS los dispositivos únicos con su conteo total y el
+//  timestamp de su último registro. Usa agregación — sin límite.
+//  ?collection=<nombre>
+// ──────────────────────────────────────────────────────────────────
+app.get('/api/dispositivos', async (req, res) => {
+  try {
+    const collectionName = req.query.collection || 'sensor_readings';
+    const Modelo = getModelo(collectionName);
+
+    const pipeline = [
+      {
+        $group: {
+          _id:           '$DeviceCode',
+          count:         { $sum: 1 },
+          lastTimestamp: { $max: '$Timestamp' },
+        },
+      },
+      { $sort: { count: -1 } },
+    ];
+
+    const resultado = await Modelo.aggregate(pipeline);
+    const respuesta = resultado.map(d => ({
+      DeviceCode:    d._id,
+      count:         d.count,
+      lastTimestamp: d.lastTimestamp,
+    }));
+
+    res.json(respuesta);
+  } catch (error) {
+    console.error('Error en /api/dispositivos:', error);
+    res.status(500).json({ error: 'Error interno del servidor', detalle: error.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────
 //  GET /api/sensores
-//  Devuelve los últimos valores agrupados por sensorType y deviceCode
-//  Útil para las tarjetas de métricas del panel
-// ──────────────────────────────────────────────────────────
+//  Último valor de cada SensorType agrupado por tipo
+// ──────────────────────────────────────────────────────────────────
 app.get('/api/sensores', async (req, res) => {
   try {
     const collectionName = req.query.collection || 'sensor_readings';
-    const Modelo = mongoose.models[collectionName]
-      || mongoose.model(collectionName, RegistroSchema, collectionName);
+    const Modelo = getModelo(collectionName);
 
-    // Agrupar por sensorType — obtener el último valor de cada tipo
     const pipeline = [
-      { $sort: { timestamp: -1 } },
+      { $sort: { Timestamp: -1 } },
       {
         $group: {
-          _id: '$sensorType',
-          lastValue:    { $first: '$value' },
-          unit:         { $first: '$unit' },
-          deviceCode:   { $first: '$deviceCode' },
-          sensorCode:   { $first: '$sensorCode' },
-          timestamp:    { $first: '$timestamp' },
+          _id:        '$SensorType',
+          lastValue:  { $first: '$Value' },
+          deviceCode: { $first: '$DeviceCode' },
+          timestamp:  { $first: '$Timestamp' },
         },
       },
     ];
@@ -88,30 +117,16 @@ app.get('/api/sensores', async (req, res) => {
   }
 });
 
-// Ruta de diagnóstico general
-app.get('/', (req, res) => {
-  res.json({
-    status: 'ok',
-    rutas: [
-      'GET /api/datos?collection=sensor_readings&sensorType=temperature&limit=100',
-      'GET /api/sensores?collection=sensor_readings',
-      'GET /api/diagnostico  → lista colecciones y conteo de documentos',
-    ],
-  });
-});
-
-// ──────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────
 //  GET /api/diagnostico
-//  Lista todas las colecciones de la BD y su cantidad de documentos.
-//  Útil para saber en cuál colección están llegando los datos de Kafka.
-// ──────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────
 app.get('/api/diagnostico', async (req, res) => {
   try {
     const db = mongoose.connection.db;
     const colecciones = await db.listCollections().toArray();
     const resultado = await Promise.all(
       colecciones.map(async (col) => ({
-        coleccion: col.name,
+        coleccion:   col.name,
         documentos: await db.collection(col.name).countDocuments(),
       }))
     );
@@ -119,6 +134,18 @@ app.get('/api/diagnostico', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    rutas: [
+      'GET /api/datos?collection=sensor_readings&sensorType=temperature&limit=500',
+      'GET /api/dispositivos?collection=sensor_readings',
+      'GET /api/sensores?collection=sensor_readings',
+      'GET /api/diagnostico',
+    ],
+  });
 });
 
 app.listen(PORT, () => {
