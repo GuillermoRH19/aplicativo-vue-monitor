@@ -24,25 +24,7 @@ const CONFIG = {
     FECHA:       'Timestamp',
   },
 
-  SENSORES: {
-    CAMPO_S1:  'Value',
-    FILTER_S1: 'temperature',
-    LABEL_S1:  'Temperatura',
-    UNIDAD_S1: '°C',
-    COLOR_S1:  '#ff4757',
-
-    CAMPO_S2:  'Value',
-    FILTER_S2: 'humidity',
-    LABEL_S2:  'Humedad',
-    UNIDAD_S2: '%',
-    COLOR_S2:  '#6c8efb',
-
-    CAMPO_S3:  'Value',
-    FILTER_S3: 'distance',
-    LABEL_S3:  'Distancia',
-    UNIDAD_S3: 'cm',
-    COLOR_S3:  '#2ed573',
-  },
+  CAMPO_VALOR: 'Value',   // campo numérico en cada documento
 
   MAX_PUNTOS_GRAFICA: 20,
   MAX_FILAS_VISIBLES: 12,
@@ -78,13 +60,36 @@ const contadorPoll   = ref(0)
 // ── Estado: Inventario de Dispositivos ──
 const estadosDispositivos = ref({}) // { 'DeviceCode': { activo: true, registros: N } }
 
+// ── Estado: mostrar todos los dispositivos ──
+const mostrarTodosDispositivos = ref(false)
+const MAX_CARDS_VISIBLES = 6
+
+// ── Estado: sensores dinámicos (descubiertos del API) ──
+const tiposSensor    = ref([])  // ['temperatura', 'humedad', 'distancia', ...]
+const unidadesSensor = ref({})  // { temperatura: '°C', humedad: '%', ... }
+
+// Paleta dedicada a tipos de sensor (ordenada por prioridad visual)
+const PALETA_SENSORES = ['#ff4757','#6c8efb','#2ed573','#ffd93d','#ff6b35','#a29bfe','#fd79a8','#00cec9']
+
+// Icono SVG path por nombre de tipo (fallback genérico si no coincide)
+const ICONOS_SENSOR = {
+  temperatura: 'M12 2a3 3 0 0 0-3 3v7a5 5 0 1 0 6 0V5a3 3 0 0 0-3-3z',
+  humedad:     'M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z',
+  distancia:   'M2 12h20M12 5l7 7-7 7',
+  presion:     'M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm0 4v4l3 3',
+  luz:         'M12 2v2M12 20v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M2 12h2M20 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42M12 6a6 6 0 1 0 0 12A6 6 0 0 0 12 6z',
+}
+const ICONO_GENERICO = 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z'
+
+function iconoParaTipo(tipo) {
+  return ICONOS_SENSOR[tipo.toLowerCase()] ?? ICONO_GENERICO
+}
+
 // ── Estado: datos de gráficas ──
-const graficasListas = ref(false)
-const historialTiempos = ref([])   // etiquetas de tiempo eje X
-const historialS1  = ref([])
-const historialS2  = ref([])
-const historialS3  = ref([])
-const conteoDispositivos = ref({}) // { deviceId: count }
+const graficasListas   = ref(false)
+const historialTiempos = ref([])          // etiquetas eje X
+const historialSensores = ref({})         // { tipo: [v1, v2, ...] }
+const conteoDispositivos = ref({})        // { deviceId: count }
 
 // ── Canvas refs (reemplaza document.getElementById) ──
 const chartLineaRef  = ref(null)
@@ -172,45 +177,34 @@ async function fetchDispositivos() {
 //  Cada documento de Kafka tiene: sensorType (temperature/humidity/pressure)
 //  y el valor numérico en 'value'. Filtramos por sensorType antes de extraer.
 // ────────────────────────────────────────────────────────────
-/**
- * Extrae el último valor de un campo dentro de la lista,
- * filtrando primero por sensorType si se proporciona filtroTipo.
- * Si no hay datos reales, genera un mock realista.
- */
-function parsearSensor(lista, campo, filtroTipo, semilla) {
-  if (campo) {
-    const sublista = filtroTipo
-      ? lista.filter(i => i.SensorType === filtroTipo)
-      : lista
-    const vals = sublista.map(i => parseFloat(i[campo])).filter(v => !isNaN(v))
-    if (vals.length) return vals[vals.length - 1]
-    // Si el tipo de sensor aún no está en los datos actuales, devuelve null
-    return null
-  }
-  // Mock de respaldo (solo si campo es null)
-  const base = (lista.length % 30) + semilla
-  return parseFloat((base + Math.sin(contadorPoll.value * 0.4 + semilla) * 5).toFixed(1))
-}
-
 function actualizarDatosSensores(lista) {
   const ahora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-  const max = CONFIG.MAX_PUNTOS_GRAFICA
+  const max   = CONFIG.MAX_PUNTOS_GRAFICA
 
-  const s1 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S1, CONFIG.SENSORES.FILTER_S1, 22)
-  const s2 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S2, CONFIG.SENSORES.FILTER_S2, 60)
-  const s3 = parsearSensor(lista, CONFIG.SENSORES.CAMPO_S3, CONFIG.SENSORES.FILTER_S3, 1013)
+  // 1. Descubrir todos los tipos de sensor presentes en los datos
+  lista.forEach(item => {
+    const tipo  = (item.SensorType ?? item.sensorType ?? '').toLowerCase()
+    const unidad = item.Unit ?? item.unit ?? ''
+    if (!tipo) return
+    if (!unidadesSensor.value[tipo]) unidadesSensor.value[tipo] = unidad
+    if (!tiposSensor.value.includes(tipo)) tiposSensor.value = [...tiposSensor.value, tipo].sort()
+  })
 
+  // 2. Para cada tipo, obtener el último valor del ciclo
+  tiposSensor.value.forEach(tipo => {
+    const sublista = lista.filter(i => (i.SensorType ?? i.sensorType ?? '').toLowerCase() === tipo)
+    const vals     = sublista.map(i => parseFloat(i[CONFIG.CAMPO_VALOR])).filter(v => !isNaN(v))
+    const ultimo   = vals.length ? vals[vals.length - 1] : null
+
+    const arr = historialSensores.value[tipo] ?? []
+    arr.push(ultimo)
+    if (arr.length > max) arr.shift()
+    historialSensores.value = { ...historialSensores.value, [tipo]: arr }
+  })
+
+  // 3. Avanzar eje de tiempo
   historialTiempos.value.push(ahora)
-  historialS1.value.push(s1)
-  historialS2.value.push(s2)
-  historialS3.value.push(s3)
-
-  if (historialTiempos.value.length > max) {
-    historialTiempos.value.shift()
-    historialS1.value.shift()
-    historialS2.value.shift()
-    historialS3.value.shift()
-  }
+  if (historialTiempos.value.length > max) historialTiempos.value.shift()
 
   actualizarGraficas()
 }
@@ -223,36 +217,11 @@ function inicializarGraficas() {
   Chart.defaults.font.family = "'Inter', 'Segoe UI', sans-serif"
 
 
-  // 1. Gráfica de líneas: sensores en tiempo real
+  // 1. Gráfica de líneas: sensores en tiempo real (datasets dinámicos)
   if (chartLineaRef.value) {
     chartLinea = new Chart(chartLineaRef.value, {
       type: 'line',
-      data: {
-        labels: [],
-        datasets: [
-          {
-            label: `${CONFIG.SENSORES.LABEL_S1} (${CONFIG.SENSORES.UNIDAD_S1})`,
-            data: [], borderColor: CONFIG.SENSORES.COLOR_S1,
-            backgroundColor: CONFIG.SENSORES.COLOR_S1 + '22',
-            tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6,
-            borderWidth: 2, borderDash: [],
-          },
-          {
-            label: `${CONFIG.SENSORES.LABEL_S2} (${CONFIG.SENSORES.UNIDAD_S2})`,
-            data: [], borderColor: CONFIG.SENSORES.COLOR_S2,
-            backgroundColor: CONFIG.SENSORES.COLOR_S2 + '22',
-            tension: 0.4, fill: true, pointRadius: 3, pointHoverRadius: 6,
-            borderWidth: 2, borderDash: [5, 3],
-          },
-          {
-            label: `${CONFIG.SENSORES.LABEL_S3} (${CONFIG.SENSORES.UNIDAD_S3})`,
-            data: [], borderColor: CONFIG.SENSORES.COLOR_S3,
-            backgroundColor: CONFIG.SENSORES.COLOR_S3 + '22',
-            tension: 0.4, fill: false, pointRadius: 3, pointHoverRadius: 6,
-            borderWidth: 2, borderDash: [2, 2],
-          },
-        ],
-      },
+      data: { labels: [], datasets: [] },
       options: {
         responsive: true, maintainAspectRatio: false, animation: { duration: 400 },
         interaction: { mode: 'index', intersect: false },
@@ -271,6 +240,8 @@ function inicializarGraficas() {
           y: {
             grid: { color: '#252a38', drawBorder: false },
             ticks: { padding: 8 },
+            beginAtZero: false,
+            grace: '10%',
           },
         },
       },
@@ -318,12 +289,35 @@ const PALETA = ['#6c8efb','#ff4757','#2ed573','#ffd93d','#ff6b35','#a29bfe','#fd
 function actualizarGraficas() {
   if (!graficasListas.value) return
 
-  // Línea
+  // Línea — sincronizar datasets dinámicamente
   if (chartLinea) {
     chartLinea.data.labels = [...historialTiempos.value]
-    chartLinea.data.datasets[0].data = [...historialS1.value]
-    chartLinea.data.datasets[1].data = [...historialS2.value]
-    chartLinea.data.datasets[2].data = [...historialS3.value]
+
+    tiposSensor.value.forEach((tipo, idx) => {
+      const color   = PALETA_SENSORES[idx % PALETA_SENSORES.length]
+      const unidad  = unidadesSensor.value[tipo] ?? ''
+      const label   = tipo.charAt(0).toUpperCase() + tipo.slice(1) + (unidad ? ` (${unidad})` : '')
+      const data    = historialSensores.value[tipo] ?? []
+
+      // Buscar dataset existente o crear uno nuevo
+      let ds = chartLinea.data.datasets.find(d => d._sensorTipo === tipo)
+      if (!ds) {
+        ds = {
+          _sensorTipo: tipo,
+          label,
+          data: [],
+          borderColor:     color,
+          backgroundColor: color + '22',
+          tension: 0.4, fill: true,
+          pointRadius: 3, pointHoverRadius: 6,
+          borderWidth: 2,
+          spanGaps: true,
+        }
+        chartLinea.data.datasets.push(ds)
+      }
+      ds.data = [...data]
+    })
+
     chartLinea.update('none')
   }
 
@@ -368,21 +362,29 @@ const nivelAlerta = computed(() => {
   return 'medio'
 })
 
-// Último valor de cada sensor (para las tarjetas métricas)
-const ultimoS1 = computed(() => historialS1.value[historialS1.value.length - 1] ?? '—')
-const ultimoS2 = computed(() => historialS2.value[historialS2.value.length - 1] ?? '—')
-const ultimoS3 = computed(() => historialS3.value[historialS3.value.length - 1] ?? '—')
+// Último valor de cada sensor (dinámico)
+function ultimoValorSensor(tipo) {
+  const arr = historialSensores.value[tipo]
+  if (!arr?.length) return '—'
+  const v = arr[arr.length - 1]
+  return v != null ? v : '—'
+}
 
 // ──────────────────────────────────────────────────────────────
 //  GRID DE DISPOSITIVOS
 //  Agrupa el array raw por DeviceCode y extrae el último valor
 //  de cada tipo de sensor para mostrarlo en las cards.
 // ──────────────────────────────────────────────────────────────
-const SENSOR_DEFS = [
-  { tipo: CONFIG.SENSORES.FILTER_S1, label: CONFIG.SENSORES.LABEL_S1, unidad: CONFIG.SENSORES.UNIDAD_S1, color: CONFIG.SENSORES.COLOR_S1, icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.31-8.86c-1.77-.45-2.34-.94-2.34-1.67 0-.84.79-1.43 2.1-1.43 1.38 0 1.9.66 1.94 1.64h1.71c-.05-1.34-.87-2.57-2.49-2.97V5H10.9v1.69c-1.51.32-2.72 1.3-2.72 2.81 0 1.79 1.48 2.68 3.66 3.19 1.95.46 2.34 1.15 2.34 1.86 0 .53-.39 1.38-2.1 1.38-1.6 0-2.23-.72-2.32-1.64H8.04c.1 1.7 1.37 2.66 2.86 2.97V19h2.34v-1.67c1.52-.29 2.72-1.16 2.73-2.77-.01-2.2-1.9-2.96-3.66-3.42z' },
-  { tipo: CONFIG.SENSORES.FILTER_S2, label: CONFIG.SENSORES.LABEL_S2, unidad: CONFIG.SENSORES.UNIDAD_S2, color: CONFIG.SENSORES.COLOR_S2, icon: 'M12 2a5 5 0 0 1 5 5v6a5 5 0 0 1-10 0V7a5 5 0 0 1 5-5zm0 15a7 7 0 0 0 7-7H5a7 7 0 0 0 7 7zm0 2v2m-3 0h6' },
-  { tipo: CONFIG.SENSORES.FILTER_S3, label: CONFIG.SENSORES.LABEL_S3, unidad: CONFIG.SENSORES.UNIDAD_S3, color: CONFIG.SENSORES.COLOR_S3, icon: 'M2 12h20M12 2v20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07' },
-]
+// SENSOR_DEFS ahora es dinámico: se construye a partir de los tipos descubiertos del API
+const SENSOR_DEFS = computed(() =>
+  tiposSensor.value.map((tipo, idx) => ({
+    tipo,
+    label:  tipo.charAt(0).toUpperCase() + tipo.slice(1),
+    unidad: unidadesSensor.value[tipo] ?? '',
+    color:  PALETA_SENSORES[idx % PALETA_SENSORES.length],
+    icon:   iconoParaTipo(tipo),
+  }))
+)
 
 const dispositivosGrid = computed(() => {
   const ahora = Date.now()
@@ -391,8 +393,8 @@ const dispositivosGrid = computed(() => {
   const mapa = {}
   registros.value.forEach(item => {
     const dId        = item[CONFIG.CAMPOS_REGISTROS.DEVICE_ID] ?? 'desconocido'
-    const sensorType = (item.SensorType ?? '').toLowerCase()
-    const value      = parseFloat(item[CONFIG.CAMPOS_REGISTROS.VALOR])
+    const sensorType = (item.SensorType ?? item.sensorType ?? '').toLowerCase()
+    const value      = parseFloat(item[CONFIG.CAMPOS_REGISTROS.VALOR] ?? item.value ?? item.Value)
 
     if (!mapa[dId]) {
       mapa[dId] = { id: dId, lastTs: 0, ultimaActualizacion: null, sensores: {} }
@@ -423,6 +425,13 @@ const dispositivosGrid = computed(() => {
     }
   }).sort((a, b) => b.registros - a.registros)
 })
+
+// Dispositivos visibles (con límite colapsable)
+const dispositivosVisibles = computed(() =>
+  mostrarTodosDispositivos.value
+    ? dispositivosGrid.value
+    : dispositivosGrid.value.slice(0, MAX_CARDS_VISIBLES)
+)
 
 // Formatea el timestamp para mostrarlo en la card
 function formatTimestamp(ts) {
@@ -524,7 +533,7 @@ onUnmounted(() => {
       <!-- GRID de cards -->
       <div v-else class="devices-grid">
         <div
-          v-for="(dev, idx) in dispositivosGrid"
+          v-for="(dev, idx) in dispositivosVisibles"
           :key="dev.id"
           class="dcard"
           :class="{ 'dcard--top': idx === 0, 'dcard--inactivo': !dev.activo }"
@@ -587,6 +596,22 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
+
+      <!-- Botón Ver más / Ver todos -->
+      <div v-if="dispositivosGrid.length > MAX_CARDS_VISIBLES" class="devices-vermas">
+        <button class="btn-vermas" @click="mostrarTodosDispositivos = !mostrarTodosDispositivos">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline v-if="mostrarTodosDispositivos" points="18 15 12 9 6 15"/>
+            <polyline v-else points="6 9 12 15 18 9"/>
+          </svg>
+          {{ mostrarTodosDispositivos
+              ? 'Mostrar menos'
+              : `Ver todos (${dispositivosGrid.length} dispositivos)` }}
+        </button>
+        <span class="badge-pill" style="font-size:.7rem">
+          Mostrando {{ dispositivosVisibles.length }} de {{ dispositivosGrid.length }}
+        </span>
+      </div>
     </section>
 
     <!-- ═══════════════════════════════════════════════
@@ -598,20 +623,28 @@ onUnmounted(() => {
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
           Gráficas de Sensores en Tiempo Real
         </h2>
-        <span class="badge-pill badge-live">
-          <span class="live-dot"></span>
-          LIVE
-        </span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="badge-pill" style="font-size:.68rem">
+            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            Actualiza cada {{ CONFIG.POLLING_INTERVAL_MS / 1000 }}s
+          </span>
+          <span class="badge-pill badge-live">
+            <span class="live-dot"></span>
+            LIVE
+          </span>
+        </div>
       </div>
-      <!-- Leyenda de sensores -->
+      <!-- Leyenda de sensores — dinámica -->
       <div class="sensor-legend">
-        <div class="legend-item" v-for="(s, i) in [
-          { label: CONFIG.SENSORES.LABEL_S1, color: CONFIG.SENSORES.COLOR_S1, dash: 'solid' },
-          { label: CONFIG.SENSORES.LABEL_S2, color: CONFIG.SENSORES.COLOR_S2, dash: 'dashed' },
-          { label: CONFIG.SENSORES.LABEL_S3, color: CONFIG.SENSORES.COLOR_S3, dash: 'dotted' },
-        ]" :key="i">
-          <span class="legend-line" :style="{ background: s.color, borderBottom: `2px ${s.dash} ${s.color}` }"></span>
-          <span>{{ s.label }}</span>
+        <div v-if="SENSOR_DEFS.length === 0" style="font-size:.75rem;color:var(--clr-muted)">
+          Esperando datos del API…
+        </div>
+        <div class="legend-item" v-for="(s, i) in SENSOR_DEFS" :key="s.tipo">
+          <span class="legend-line" :style="{ background: s.color }"></span>
+          <span>{{ s.label }}<em v-if="s.unidad" style="font-style:normal;color:var(--clr-muted);margin-left:3px">({{ s.unidad }})</em></span>
+          <span style="font-size:.68rem;color:var(--clr-muted);margin-left:4px">
+            {{ ultimoValorSensor(s.tipo) !== '—' ? ultimoValorSensor(s.tipo) + ' ' + s.unidad : '—' }}
+          </span>
         </div>
       </div>
 
@@ -1059,6 +1092,28 @@ onUnmounted(() => {
   margin-top: 2px;
 }
 .dcard__footer svg { stroke: var(--clr-muted); flex-shrink: 0; }
+
+/* ── Botón Ver más ── */
+.devices-vermas {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding-top: 6px;
+}
+.btn-vermas {
+  display: flex; align-items: center; gap: 7px;
+  padding: 8px 20px;
+  background: transparent;
+  border: 1px solid var(--clr-border);
+  border-radius: 20px;
+  color: var(--clr-accent);
+  font-size: .8rem; font-weight: 600;
+  cursor: pointer;
+  transition: all .2s;
+}
+.btn-vermas svg { stroke: var(--clr-accent); flex-shrink: 0; }
+.btn-vermas:hover {
+  background: rgba(108,142,251,.1);
+  border-color: var(--clr-accent);
+}
 
 /* ══════════════════════════════════════════════════
    GRÁFICAS — Sección nueva
